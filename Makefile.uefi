@@ -1,0 +1,101 @@
+# UEFI Makefile for HackBGRT
+# This Makefile builds the UEFI application on Linux using MinGW-w64 cross-compiler
+
+# Target architecture (x86_64, i686)
+ARCH ?= x86_64
+
+# Toolchain
+ifeq ($(ARCH),x86_64)
+    CC = x86_64-w64-mingw32-gcc
+    LD = x86_64-w64-mingw32-ld
+    OBJCOPY = x86_64-w64-mingw32-objcopy
+    EFI_ARCH = x86_64
+else ifeq ($(ARCH),i686)
+    CC = i686-w64-mingw32-gcc
+    LD = i686-w64-mingw32-ld
+    OBJCOPY = i686-w64-mingw32-objcopy
+    EFI_ARCH = ia32
+else
+    $(error Unsupported architecture: $(ARCH))
+endif
+
+# Paths - Use local gnu-efi submodule
+GNUEFI_PATH = $(shell pwd)/gnu-efi
+EFI_INC = $(GNUEFI_PATH)/inc
+EFI_ARCH_INC = $(GNUEFI_PATH)/inc/$(EFI_ARCH)
+EFI_PROTOCOL_INC = $(GNUEFI_PATH)/inc/protocol
+EFI_LIB = $(GNUEFI_PATH)/$(EFI_ARCH)/lib
+
+# No need for pkg-config with local gnu-efi
+GNUEFI_INC = -I$(EFI_INC) -I$(EFI_ARCH_INC) -I$(EFI_PROTOCOL_INC) -I$(GNUEFI_PATH)/inc/gnuefi
+
+# Flags
+CFLAGS = -Wall -Wextra -Werror \
+         -Wno-sign-compare \
+         -Wno-unused-parameter \
+         -I. \
+         -I$(EFI_INC) \
+         -I$(EFI_ARCH_INC) \
+         -I$(EFI_PROTOCOL_INC) \
+         $(GNUEFI_INC) \
+         -ffreestanding \
+         -fno-stack-protector \
+         -fno-stack-check \
+         -fshort-wchar \
+         -mno-red-zone \
+         -mno-avx \
+         -maccumulate-outgoing-args \
+         -DEFI_FUNCTION_WRAPPER \
+         -DGNU_EFI_USE_MS_ABI \
+         -D__MAKEWITH_GNUEFI
+
+# Our local source files
+SRCS = $(wildcard src/*.c)
+LOCAL_OBJS = $(SRCS:%.c=%.o)
+
+# No gnu-efi objects to link - we provide our own implementations
+GNUEFI_OBJS =
+
+# All objects to link
+OBJS = $(LOCAL_OBJS) $(GNUEFI_OBJS)
+
+# Minimal set of libraries to link against
+EFI_LIBS = $(GNUEFI_PATH)/$(EFI_ARCH)/gnuefi/libgnuefi.a
+
+# Linker flags
+LDFLAGS = -nostdlib \
+          -Wl,-dll \
+          -Wl,--subsystem,10 \
+          -e efi_main \
+          -s \
+          -L$(GNUEFI_PATH)/$(EFI_ARCH)/gnuefi \
+          -L$(GNUEFI_PATH)/$(EFI_ARCH)/lib \
+          -L$(GNUEFI_PATH)/lib \
+          -Wl,--start-group \
+          $(EFI_LIBS) \
+          -Wl,--end-group \
+          -lgcc \
+          -Wl,--defsym=efi_main=efi_main \
+          -Wl,--entry=efi_main
+
+# Source files
+SRC = $(wildcard src/*.c)
+OBJ = $(SRC:.c=.o)
+TARGET = HackBGRT.efi
+
+# Default target
+all: $(TARGET)
+
+# Build the EFI application
+$(TARGET): $(OBJ)
+	$(CC) -o $@ $(EFI_OBJS) $^ $(EFI_LIBS) $(LDFLAGS)
+
+# Compile C files
+%.o: %.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# Clean build artifacts
+clean:
+	rm -f $(OBJ) $(TARGET) *.map
+
+.PHONY: all clean

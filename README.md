@@ -16,6 +16,10 @@ When booting on a UEFI-based computer, Windows may show a vendor-defined logo wh
 * Make sure that you have read the Secure Boot instructions.
 * Make sure that BitLocker is disabled, or find your recovery key.
 
+### Linux Installation
+
+For Linux systems, please see the [Linux-specific instructions](README.linux.md) for building and installation.
+
 ### Secure Boot instructions
 
 HackBGRT is not approved by Microsoft. Instead, HackBGRT comes with the *shim* boot loader, which allows to manually select HackBGRT as a trusted program. After installing HackBGRT and rebooting your computer, you have to **follow the instructions in [shim.md](shim.md)** to achieve this. These steps cannot be automated, that's the whole point of Secure Boot. Although HackBGRT is self-signed with a certificate, it's not advisable to enroll foreign certificates directly into your firmware.

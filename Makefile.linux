@@ -1,0 +1,38 @@
+# Linux Makefile for HackBGRT
+# This is a simplified Makefile for building HackBGRT on Linux
+
+# Compiler and flags
+CC = gcc
+CFLAGS = -std=c17 -Wall -Wextra -Wno-error=sign-compare -I. -I./src -I/usr/include/efi -I/usr/include/efi/x86_64 -I/usr/include/efi/protocol
+LDFLAGS = -L/usr/lib -lefivar -lefi
+TARGET = hackbgrt-linux
+
+# Source files
+FILES_C = src/main.c src/util.c src/types.c src/config.c src/sbat.c src/efi.c
+FILES_H = $(wildcard src/*.h)
+
+# Default target
+all: $(TARGET)
+
+# Main build rule
+$(TARGET): $(FILES_C) $(FILES_H)
+	$(CC) $(CFLAGS) -o $@ $(FILES_C) $(LDFLAGS)
+
+# Clean build artifacts
+clean:
+	rm -f $(TARGET)
+
+# Install target (requires root)
+install: $(TARGET)
+	@if [ "$$(id -u)" -ne 0 ]; then \
+		echo "Error: This target must be run as root" >&2; \
+		exit 1; \
+	fi
+	@echo "Installing $(TARGET) to /usr/local/bin/"
+	@install -Dm755 $(TARGET) /usr/local/bin/$(TARGET)
+
+# Uninstall target
+uninstall:
+	rm -f /usr/local/bin/$(TARGET)
+
+.PHONY: all clean install uninstall

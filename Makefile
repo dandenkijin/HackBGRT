@@ -1,12 +1,35 @@
-CC = clang
-CFLAGS = -target $(CLANG_TARGET) -ffreestanding -fshort-wchar
-CFLAGS += -std=c17 -Wshadow -Wall -Wunused -Werror-implicit-function-declaration
-CFLAGS += -I$(GNUEFI_INC) -I$(GNUEFI_INC)/$(GNUEFI_ARCH) -I$(GNUEFI_INC)/protocol
-CFLAGS += $(ARCH_CFLAGS)
-LDFLAGS = -target $(CLANG_TARGET) -nostdlib -Wl,-entry:efi_main -Wl,-subsystem:efi_application -fuse-ld=lld
-ARCH_CFLAGS = -O2 -mno-red-zone
+# Compiler and flags for Linux build
+LINUX_CC = gcc
+LINUX_CFLAGS = -std=c17 -Wall -Wextra -Werror -I. -I./src
+LINUX_LDFLAGS = -lefivar -lefi -luefi
+LINUX_TARGET = hackbgrt-linux
 
-GNUEFI_INC = gnu-efi/inc
+# Compiler and flags for EFI build
+EFI_CC = clang
+EFI_CFLAGS = -target $(CLANG_TARGET) -ffreestanding -fshort-wchar -fno-stack-protector
+EFI_CFLAGS += -std=c17 -Wshadow -Wall -Wunused -Werror-implicit-function-declaration
+# System gnu-efi headers (primary)
+EFI_CFLAGS += -I/usr/include/efi -I/usr/include/efi/$(GNUEFI_ARCH) -I/usr/include/efi/protocol
+# Local gnu-efi headers (fallback)
+EFI_CFLAGS += -I. -I$(GNUEFI_INC) -I$(GNUEFI_INC)/$(GNUEFI_ARCH) -I$(GNUEFI_INC)/protocol
+EFI_CFLAGS += -I$(GNUEFI_SRC)/inc -I$(GNUEFI_SRC)/inc/$(GNUEFI_ARCH) -I$(GNUEFI_SRC)/inc/protocol
+EFI_CFLAGS += -O2 -mno-red-zone -fno-strict-aliasing -fno-merge-all-constants
+
+EFI_LDFLAGS = -target $(CLANG_TARGET) -nostdlib -Wl,-entry:efi_main -Wl,-subsystem:efi_application -fuse-ld=lld
+EFI_LDFLAGS += -Wl,-T,$(GNUEFI_SRC)/gnuefi/elf_$(GNUEFI_ARCH)_efi.lds
+EFI_LDFLAGS += -Wl,-Bsymbolic -Wl,-znocombreloc -Wl,--no-undefined -Wl,-nostdlib
+
+# Default target builds both Linux and EFI
+all: linux efi
+
+# GNU-EFI paths
+GNUEFI_SRC = gnu-efi
+GNUEFI_INC = $(GNUEFI_SRC)/inc
+GNUEFI_OBJ = $(GNUEFI_SRC)/$(GNUEFI_ARCH)
+
+# Build gnu-efi libraries if they don't exist
+$(GNUEFI_OBJ)/lib/libefi.a $(GNUEFI_OBJ)/gnuefi/libgnuefi.a:
+	$(MAKE) -C $(GNUEFI_SRC) ARCH=$(GNUEFI_ARCH) CC=$(EFI_CC)
 
 FILES_C = src/main.c src/util.c src/types.c src/config.c src/sbat.c src/efi.c
 FILES_H = $(wildcard src/*.h)
@@ -32,11 +55,12 @@ RELEASE_NAME = HackBGRT-$(GIT_DESCRIBE:v%=%)
 EFI_ARCH_LIST = x64 ia32 aa64 arm
 EFI_SIGNED_FILES = $(patsubst %,efi-signed/boot%.efi,$(EFI_ARCH_LIST))
 
-.PHONY: all efi efi-signed setup release clean
+.PHONY: all efi efi-signed setup release clean linux linux-install linux-uninstall
 
 all: efi setup
 	@echo "Run 'make efi-signed' to sign the EFI executables."
 	@echo "Run 'make release' to build a release-ready ZIP archive."
+	@echo "Run 'make linux' to build for Linux."
 	@echo "Run 'make run-qemu-<arch>' to test the EFI executables with QEMU."
 
 efi: $(patsubst %,efi/boot%.efi,$(EFI_ARCH_LIST))
@@ -89,9 +113,13 @@ efi/bootia32.efi: GNUEFI_ARCH = ia32
 efi/bootaa64.efi: CLANG_TARGET = aarch64-pc-windows-msvc
 efi/bootaa64.efi: GNUEFI_ARCH = aa64
 
-efi/boot%.efi: $(FILES_C)
+efi/boot%.efi: $(FILES_C) | $(GNUEFI_OBJ)/lib/libefi.a $(GNUEFI_OBJ)/gnuefi/libgnuefi.a
 	@mkdir -p efi
-	$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@
+	$(CC) $(CFLAGS) -c $< -o $(<:.c=.o)
+	ld -o $@ -nostdlib -T $(GNUEFI_SRC)/gnuefi/elf_$(GNUEFI_ARCH)_efi.lds -shared -Bsymbolic -znocombreloc \
+	  $(GNUEFI_OBJ)/gnuefi/crt0-efi-$(GNUEFI_ARCH).o $(FILES_C:.c=.o) \
+	  -L$(GNUEFI_OBJ)/lib -l:libefi.a -L$(GNUEFI_OBJ)/gnuefi -l:libgnuefi.a /usr/lib/gcc/x86_64-linux-gnu/*/libgcc.a
+	rm -f $(FILES_C:.c=.o)
 
 efi/bootarm.efi: CLANG_TARGET = armv6-pc-windows-msvc
 efi/bootarm.efi: GNUEFI_ARCH = arm
@@ -102,12 +130,132 @@ efi/bootarm.efi: $(FILES_C)
 	@echo "Fix $@ architecture code (IMAGE_FILE_MACHINE_ARMTHUMB_MIXED = 0x01C2)"
 	echo -en "\xc2\x01" | dd of=$@ bs=1 seek=124 count=2 conv=notrunc status=none
 
+# Main build targets
+.PHONY: all linux efi clean
+
+# Linux build target
+linux: $(FILES_C) $(FILES_H)
+	$(LINUX_CC) $(LINUX_CFLAGS) -o $(LINUX_TARGET) $(FILES_C) $(LINUX_LDFLAGS)
+
+# EFI build target
+efi: $(FILES_C) $(FILES_H) | $(GNUEFI_OBJ)/lib/libefi.a $(GNUEFI_OBJ)/gnuefi/libgnuefi.a
+	@mkdir -p efi
+	$(EFI_CC) $(EFI_CFLAGS) $(EFI_LDFLAGS) $(FILES_C) \
+	  -L$(GNUEFI_OBJ)/lib -l:libefi.a -L$(GNUEFI_OBJ)/gnuefi -l:libgnuefi.a \
+	  -o efi/bootx64.efi
+
+# Clean up all build artifacts
 clean:
-	rm -rf setup.exe efi efi-signed
+	rm -rf setup.exe efi efi-signed $(LINUX_TARGET)
 	rm -f src/GIT_DESCRIBE.cs
 	rm -rf release
 	rm -rf test
+	rm -f linux-install.sh
+	rm -f linux-uninstall.sh
+	$(MAKE) -C gnu-efi clean
 
+# Linux-specific targets
+linux: linux-install.sh linux-uninstall.sh
+	@echo "Linux installation scripts generated. Run 'make linux-install' to install or 'make linux-uninstall' to uninstall."
+
+# Generate Linux installation script
+linux-install.sh: Makefile
+	@echo '#!/bin/bash' > $@
+	@echo '# HackBGRT Linux Installer' >> $@
+	@echo '# Generated on '`date` >> $@
+	@echo 'set -e' >> $@
+	@echo '' >> $@
+	@echo '# Check for root' >> $@
+	@echo 'if [ "$$(id -u)" -ne 0 ]; then' >> $@
+	@echo '    echo "Error: This script must be run as root" >&2' >> $@
+	@echo '    exit 1' >> $@
+	@echo 'fi' >> $@
+	@echo '' >> $@
+	@echo '# Configuration' >> $@
+	@echo 'EFI_PARTITION=$${EFI_PARTITION:-/boot/efi}' >> $@
+	@echo 'INSTALL_DIR=$$EFI_PARTITION/EFI/HackBGRT' >> $@
+	@echo 'BACKUP_DIR=$$EFI_PARTITION/EFI/Microsoft/Boot/BACKUP/$$(date +%Y%m%d%H%M%S)' >> $@
+	@echo '' >> $@
+	@echo 'echo "Installing HackBGRT..."' >> $@
+	@echo '' >> $@
+	@echo '# Create installation directory' >> $@
+	@echo 'mkdir -p "$$INSTALL_DIR"' >> $@
+	@echo '' >> $@
+	@echo '# Copy EFI binaries' >> $@
+	@echo 'echo "Copying EFI binaries..."' >> $@
+	@echo 'for arch in $(EFI_ARCH_LIST); do' >> $@
+	@echo '    if [ -f "efi/boot$$arch.efi" ]; then' >> $@
+	@echo '        cp -v "efi/boot$$arch.efi" "$$INSTALL_DIR/"' >> $@
+	@echo '    fi' >> $@
+	@echo 'done' >> $@
+	@echo '' >> $@
+	@echo '# Copy configuration and splash image' >> $@
+	@echo 'if [ -f "splash.bmp" ]; then' >> $@
+	@echo '    cp -v "splash.bmp" "$$INSTALL_DIR/&& echo "Copied splash.bmp"' >> $@
+	@echo 'fi' >> $@
+	@echo 'if [ -f "config.txt" ]; then' >> $@
+	@echo '    cp -v "config.txt" "$$INSTALL_DIR/&& echo "Copied config.txt"' >> $@
+	@echo 'fi' >> $@
+	@echo '' >> $@
+	@echo '# Create boot entry' >> $@
+	@echo 'echo "Creating boot entry..."' >> $@
+	@echo 'if command -v efibootmgr >/dev/null 2>&1; then' >> $@
+	@echo '    EFI_DISK=$$(df "$$EFI_PARTITION" | tail -1 | awk '"'"'{print $$1}'"'"')' >> $@
+	@echo '    EFI_PART_NUM=$$(echo "$$EFI_DISK" | grep -oE '[0-9]+$')' >> $@
+	@echo '    EFI_DISK=$$(echo "$$EFI_DISK" | sed 's/[0-9]*$$//')' >> $@
+	@echo '    EFI_DISK=$$(ls -l "$$EFI_DISK" | awk '"'"'{print $$11}'"'"' | xargs basename)' >> $@
+	@echo '    efibootmgr -c -d "/dev/$$EFI_DISK" -p $$EFI_PART_NUM -L "HackBGRT" -l '\\EFI\\HackBGRT\\bootx64.efi' -u 'rootwait quiet splash' || echo "Warning: Failed to create boot entry. You may need to create it manually."' >> $@
+	@echo 'else' >> $@
+	@echo '    echo "efibootmgr not found. You may need to create the boot entry manually."' >> $@
+	@echo 'fi' >> $@
+	@echo '' >> $@
+	@echo 'echo "Installation complete!"' >> $@
+	@chmod +x $@
+
+# Generate Linux uninstallation script
+linux-uninstall.sh: Makefile
+	@echo '#!/bin/bash' > $@
+	@echo '# HackBGRT Linux Uninstaller' >> $@
+	@echo '# Generated on '`date` >> $@
+	@echo 'set -e' >> $@
+	@echo '' >> $@
+	@echo '# Check for root' >> $@
+	@echo 'if [ "$$(id -u)" -ne 0 ]; then' >> $@
+	@echo '    echo "Error: This script must be run as root" >&2' >> $@
+	@echo '    exit 1' >> $@
+	@echo 'fi' >> $@
+	@echo '' >> $@
+	@echo '# Configuration' >> $@
+	@echo 'EFI_PARTITION=$${EFI_PARTITION:-/boot/efi}' >> $@
+	@echo 'INSTALL_DIR=$$EFI_PARTITION/EFI/HackBGRT' >> $@
+	@echo '' >> $@
+	@echo 'echo "Uninstalling HackBGRT..."' >> $@
+	@echo '' >> $@
+	@echo '# Remove boot entry' >> $@
+	@echo 'if command -v efibootmgr >/dev/null 2>&1; then' >> $@
+	@echo '    echo "Removing boot entry..."' >> $@
+	@echo '    BOOT_NUM=$$(efibootmgr | grep -i hackbgr | cut -c 5-8)' >> $@
+	@echo '    if [ -n "$$BOOT_NUM" ]; then' >> $@
+	@echo '        efibootmgr -b $$BOOT_NUM -B' >> $@
+	@echo '    fi' >> $@
+	@echo 'fi' >> $@
+	@echo '' >> $@
+	@echo '# Remove installed files' >> $@
+	@echo 'echo "Removing installed files..."' >> $@
+	@echo 'rm -rfv "$$INSTALL_DIR"' >> $@
+	@echo '' >> $@
+	@echo 'echo "Uninstallation complete!"' >> $@
+	@chmod +x $@
+
+# Install on Linux
+linux-install: efi linux
+	sudo ./linux-install.sh
+
+# Uninstall from Linux
+linux-uninstall: linux
+	sudo ./linux-uninstall.sh
+
+# Test targets
 .PHONY: test $(patsubst %,run-qemu-%,$(EFI_ARCH_LIST))
 
 test: run-qemu-x64
