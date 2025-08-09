@@ -1,4 +1,33 @@
-boot*.efi
-setup.exe
+# Executables and binaries
+*.efi
+*.exe
+*.o
+*.so
+*.a
+*.lib
+*.dll
+*.dylib
+
+# Build directories
+/build/
+/obj/
+/bin/
+/lib/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Project specific
 src/GIT_DESCRIBE.cs
-html
+html/
+.ccls-cache/
+HackBGRT.efi
+src/*.o
