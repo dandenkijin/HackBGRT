@@ -67,7 +67,9 @@ typedef INTN   ssize_t;
  * It ensures consistent calling conventions across different compilers.
  */
 #ifndef EFIAPI
-#  ifdef _MSC_EXTENSIONS
+#  if defined(__GNUC__) && (__GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 7))
+#    define EFIAPI __attribute__((ms_abi))
+#  elif defined(_MSC_EXTENSIONS)
 #    define EFIAPI __cdecl
 #  else
 #    define EFIAPI

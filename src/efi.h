@@ -14,7 +14,7 @@
 #include "../gnu-efi/inc/efi.h"
 #include "../gnu-efi/inc/efilib.h"
 
-// Global system table pointers
+// Global system table pointers (defined in globals.c)
 extern EFI_SYSTEM_TABLE *ST;
 extern EFI_BOOT_SERVICES *BS;
 extern EFI_RUNTIME_SERVICES *RT;

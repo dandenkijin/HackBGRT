@@ -1,6 +1,32 @@
 #include "efi.h"
 #include "util.h"
 
+// Implementation of AllocatePool that matches gnu-efi's signature
+VOID *EFIAPI AllocatePool(IN UINTN Size) {
+    VOID *Buffer = NULL;
+    if (BS && BS->AllocatePool) {
+        EFI_STATUS Status = BS->AllocatePool(EfiLoaderData, Size, &Buffer);
+        if (EFI_ERROR(Status)) {
+            return NULL;
+        }
+    }
+    return Buffer;
+}
+
+// Implementation of CopyMem that matches gnu-efi's signature
+VOID EFIAPI CopyMem(IN VOID *Destination, IN VOID *Source, IN UINTN Length) {
+    if (BS && BS->CopyMem) {
+        BS->CopyMem(Destination, Source, Length);
+    } else {
+        // Fallback implementation if BS->CopyMem is not available
+        UINT8 *dst = Destination;
+        UINT8 *src = Source;
+        while (Length-- > 0) {
+            *dst++ = *src++;
+        }
+    }
+}
+
 // New implementations of some functions in gnu-efi.
 // These functions are designed to avoid other gnu-efi calls.
 

@@ -2,18 +2,34 @@
 #include "util.h"
 
 BOOLEAN ReadConfigFile(HackBGRT_config* config, EFI_FILE_HANDLE base_dir, const CHAR16* path) {
-	Log(1, L"Attempting to load configuration from: %s\n", path);
-	Log(1, L"Base directory: %p\n", base_dir);
+	Log(1, L"ReadConfigFile: Attempting to load configuration from: %s\n", path);
+	Log(1, L"ReadConfigFile: Base directory handle: %p\n", base_dir);
 	
-	void* data = 0;
+	// Log current directory information
+	EFI_FILE_INFO* dir_info = NULL;
+	UINTN dir_info_size = 0;
+	EFI_STATUS e = base_dir->GetInfo(base_dir, &gEfiFileInfoGuid, &dir_info_size, NULL);
+	if (e == EFI_BUFFER_TOO_SMALL) {
+		e = BS->AllocatePool(EfiBootServicesData, dir_info_size, (void**)&dir_info);
+		if (!EFI_ERROR(e)) {
+			e = base_dir->GetInfo(base_dir, &gEfiFileInfoGuid, &dir_info_size, (void*)dir_info);
+			if (!EFI_ERROR(e)) {
+				Log(1, L"ReadConfigFile: Current directory: %s\n", dir_info->FileName);
+				Log(1, L"ReadConfigFile: Directory attributes: 0x%lx\n", dir_info->Attribute);
+			}
+			BS->FreePool(dir_info);
+		}
+	}
+	
+	void* data = NULL;
 	UINTN data_bytes = 0;
+	Log(1, L"ReadConfigFile: Calling LoadFileWithPadding for %s\n", path);
 	data = LoadFileWithPadding(base_dir, path, &data_bytes, 4);
 	if (!data) {
-		Log(1, L"Failed to load configuration (%s)!\n", path);
-		Log(1, L"Data pointer: %p, Data bytes: %d\n", data, data_bytes);
+		Log(1, L"ReadConfigFile: Failed to load configuration file '%s'\n", path);
 		return FALSE;
 	}
-	Log(1, L"Successfully loaded configuration file, size: %d bytes\n", data_bytes);
+	Log(1, L"ReadConfigFile: Successfully loaded configuration file, size: %d bytes\n", data_bytes);
 	CHAR16* str;
 	UINTN str_len;
 	if (*(CHAR16*)data == 0xfeff) {

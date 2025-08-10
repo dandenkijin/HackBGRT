@@ -3,6 +3,10 @@
 
 #include "efi.h"  // Includes our local efi.h which includes gnu-efi headers
 
+// Log buffer for storing log messages
+extern CHAR16 log_buffer[65536];
+#define LOG_BUFFER_SIZE 65536
+
 // All necessary types are now defined in efi.h
 // We'll use the standard EFI types from there
 
@@ -18,10 +22,18 @@ extern const CHAR16* TmpStr(CHAR8 *src, int length);
 /**
  * Print or log a string.
  *
- * @param mode -1 = print without logging, 0 = no, 1 = yes.
- * @param fmt The format string. Supports %d, %x, %s.
+ * @param mode -1 = print without logging, 0 = log only, 1 = both.
+ * @param fmt The format string. Supports %d, %x, %s, %p, etc.
+ * @param ... Variable arguments for the format string
  */
 extern void Log(int mode, IN CONST CHAR16 *fmt, ...);
+
+/**
+ * Output a message to the console and log buffer
+ * 
+ * @param Message The message to output (must be null-terminated)
+ */
+extern void LogMessage(IN CONST CHAR16 *Message);
 
 /**
  * Dump the log buffer to the screen.

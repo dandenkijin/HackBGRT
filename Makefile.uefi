@@ -49,46 +49,75 @@ CFLAGS = -Wall -Wextra -Werror \
          -DGNU_EFI_USE_MS_ABI \
          -D__MAKEWITH_GNUEFI
 
-# Our local source files
-SRCS = $(wildcard src/*.c)
+# Our local source files (exclude globals.c as it's included separately)
+SRCS = $(filter-out src/globals.c,$(wildcard src/*.c))
 LOCAL_OBJS = $(SRCS:%.c=%.o)
 
-# No gnu-efi objects to link - we provide our own implementations
-GNUEFI_OBJS =
+# Our globals.c needs to be compiled with EFI flags
+GNUEFI_OBJS = src/globals.o
 
 # All objects to link
-OBJS = $(LOCAL_OBJS) $(GNUEFI_OBJS)
+OBJS = $(LOCAL_OBJS) $(GNUEFI_OBJS) $(EFI_OBJS)
 
-# Minimal set of libraries to link against
-EFI_LIBS = $(GNUEFI_PATH)/$(EFI_ARCH)/gnuefi/libgnuefi.a
+# Required EFI object files and libraries
+EFI_CRT_OBJ = $(GNUEFI_PATH)/$(EFI_ARCH)/gnuefi/crt0-efi-x86_64.o
+
+# Use local implementations instead of gnu-efi versions
+EFI_LIBS = -Wl,--whole-archive \
+           -lgnuefi \
+           -Wl,--no-whole-archive \
+           -Wl,--exclude-libs=libefi.a \
+           -Wl,--exclude-libs=libgnuefi.a
+
+EFI_LDS = $(GNUEFI_PATH)/gnuefi/elf_x86_64_efi.lds
+
+# EFI libraries to link against
+# EFI_LIBS = -lefi -lgnuefi
 
 # Linker flags
 LDFLAGS = -nostdlib \
           -Wl,-dll \
           -Wl,--subsystem,10 \
+          -Wl,--oformat,pei-x86-64 \
+          -Wl,--disable-dynamicbase \
+          -Wl,--strip-all \
           -e efi_main \
           -s \
-          -L$(GNUEFI_PATH)/$(EFI_ARCH)/gnuefi \
           -L$(GNUEFI_PATH)/$(EFI_ARCH)/lib \
-          -L$(GNUEFI_PATH)/lib \
-          -Wl,--start-group \
-          $(EFI_LIBS) \
-          -Wl,--end-group \
-          -lgcc \
+          -L$(GNUEFI_PATH)/$(EFI_ARCH)/gnuefi \
+          -Wl,--entry=efi_main \
           -Wl,--defsym=efi_main=efi_main \
-          -Wl,--entry=efi_main
+          -Wl,-Map=HackBGRT.map \
+          -Wl,--gc-sections \
+          -Wl,--whole-archive \
+          $(EFI_LIBS) \
+          -Wl,--no-whole-archive \
+          -lgcc
 
 # Source files
 SRC = $(wildcard src/*.c)
 OBJ = $(SRC:.c=.o)
-TARGET = HackBGRT.efi
+TARGET = HackBGRT.efi hello.efi
 
 # Default target
 all: $(TARGET)
 
 # Build the EFI application
-$(TARGET): $(OBJ)
-	$(CC) -o $@ $(EFI_OBJS) $^ $(EFI_LIBS) $(LDFLAGS)
+HackBGRT.efi: $(OBJS)
+	$(CC) -o $@.tmp $^ $(LDFLAGS)
+	$(OBJCOPY) -R .comment $@.tmp $@
+	@rm -f $@.tmp
+
+# Test application
+HELLO_OBJS = hello.o hello_support.o src/util.o src/efi.o src/config.o src/globals.o src/efi_print.o src/efi_guids.o
+
+hello.efi: $(HELLO_OBJS)
+	$(CC) -nostdlib -Wl,-dll -shared -Wl,--subsystem,10 -e efi_main -o $@.tmp $^ $(LIBS)
+	$(OBJCOPY) -R .comment $@.tmp $@
+	@rm -f $@.tmp
+
+hello.o: hello.c
+	$(CC) $(CFLAGS) -I./src -I./gnu-efi/inc -I./gnu-efi/inc/x86_64 -I./gnu-efi/inc/protocol -c -o $@ $<
 
 # Compile C files
 %.o: %.c

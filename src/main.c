@@ -3,12 +3,21 @@
 #include "efi.h"  // Includes our local efi.h which includes gnu-efi headers
 #include "types.h"
 #include "config.h"
+
+// Helper function to duplicate a string
+static CHAR16* StrDup(const CHAR16* src) {
+    if (!src) return NULL;
+    UINTN len = StrLen(src) + 1;
+    CHAR16* dst = AllocatePool(len * sizeof(CHAR16));
+    if (dst) {
+        // Cast away const for the source pointer since our CopyMem doesn't expect const
+        CopyMem(dst, (VOID*)(UINTN)src, len * sizeof(CHAR16));
+    }
+    return dst;
+}
 #include "util.h"
 
-// Define the global system table pointers
-EFI_SYSTEM_TABLE *ST;
-EFI_BOOT_SERVICES *BS;
-EFI_RUNTIME_SERVICES *RT;
+// Global system table pointers are now defined in globals.c
 
 // Forward declarations for local functions
 static void SetResolution(int w, int h);
@@ -425,6 +434,7 @@ static EFI_HANDLE LoadApp(int print_failure, EFI_HANDLE image_handle, EFI_LOADED
  * The main program.
  */
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *ST_) {
+	// Initialize global system table pointers
 	ST = ST_;
 	BS = ST_->BootServices;
 	RT = ST_->RuntimeServices;
@@ -433,49 +443,135 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *ST_) {
 	ST->ConOut->EnableCursor(ST->ConOut, 0);
 	ST->ConOut->ClearScreen(ST->ConOut);
 
-	Log(0, L"HackBGRT version: %s\n", version);
+	// Log version information
+	Log(1, L"HackBGRT version: %s\n", version);
+	Log(1, L"System Table: 0x%p\n", ST);
+	Log(1, L"Boot Services: 0x%p\n", BS);
+	Log(1, L"Runtime Services: 0x%p\n", RT);
+	Log(1, L"Image Handle: 0x%p\n", image_handle);
 
-	EFI_LOADED_IMAGE* image;
-	if (EFI_ERROR(BS->HandleProtocol(image_handle, TmpGuidPtr((EFI_GUID) EFI_LOADED_IMAGE_PROTOCOL_GUID), (void**) &image))) {
-		Log(config.debug, L"LOADED_IMAGE_PROTOCOL failed.\n");
+	// Get the loaded image protocol for the current image
+	EFI_LOADED_IMAGE* image = NULL;
+	EFI_STATUS status = BS->HandleProtocol(image_handle, TmpGuidPtr((EFI_GUID) EFI_LOADED_IMAGE_PROTOCOL_GUID), (void**) &image);
+	if (EFI_ERROR(status)) {
+		Log(1, L"Failed to get LOADED_IMAGE_PROTOCOL. Status: %r\n", status);
 		goto fail;
 	}
+	Log(1, L"Loaded Image: 0x%p\n", image);
+	Log(1, L"  Device Handle: 0x%p\n", image->DeviceHandle);
+	// Log detailed file path information
+	if (image->FilePath) {
+		CHAR16* file_path_str = DevicePathToStr(image->FilePath);
+		Log(1, L"  File Path: %s\n", file_path_str ? file_path_str : L"(null)");
+		if (file_path_str) {
+			BS->FreePool(file_path_str);
+		}
+	} else {
+		Log(1, L"  File Path: (null)\n");
+	}
 
-	EFI_FILE_IO_INTERFACE* io;
-	if (EFI_ERROR(BS->HandleProtocol(image->DeviceHandle, TmpGuidPtr((EFI_GUID) EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID), (void**) &io))) {
-		Log(config.debug, L"FILE_SYSTEM_PROTOCOL failed.\n");
+	// Get the file system protocol
+	EFI_FILE_IO_INTERFACE* io = NULL;
+	status = BS->HandleProtocol(image->DeviceHandle, TmpGuidPtr((EFI_GUID) EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID), (void**) &io);
+	if (EFI_ERROR(status)) {
+		Log(1, L"Failed to get FILE_SYSTEM_PROTOCOL. Status: %r\n", status);
+		Log(1, L"Device Handle: 0x%p\n", image->DeviceHandle);
+		// Try to get the device path for better error reporting
+		EFI_DEVICE_PATH* dev_path = NULL;
+		if (!EFI_ERROR(BS->HandleProtocol(image->DeviceHandle, TmpGuidPtr((EFI_GUID) EFI_DEVICE_PATH_PROTOCOL_GUID), (void**)&dev_path))) {
+			Log(1, L"Device Path: %s\n", DevicePathToStr(dev_path));
+		}
 		goto fail;
 	}
+	Log(1, L"File System Protocol: 0x%p\n", io);
 
-	EFI_FILE_HANDLE root_dir;
-	if (EFI_ERROR(io->OpenVolume(io, &root_dir))) {
-		Log(config.debug, L"Failed to open root directory.\n");
+	// Open the root directory of the file system
+	EFI_FILE_HANDLE root_dir = NULL;
+	status = io->OpenVolume(io, &root_dir);
+	if (EFI_ERROR(status)) {
+		Log(1, L"Failed to open root directory. Status: %r\n", status);
 		goto fail;
 	}
-
-	CHAR16* default_dir_path = L"\\EFI\\HackBGRT";
-	Log(config.debug, L"Default directory: %s\n", default_dir_path);
-	EFI_FILE_HANDLE default_dir;
-	if (EFI_ERROR(root_dir->Open(root_dir, &default_dir, default_dir_path, EFI_FILE_MODE_READ, 0))) {
-		Log(config.debug, L"Failed to open HackBGRT default directory.\n");
-		default_dir = root_dir;
-	}
-
-	CHAR16* working_dir_path = DevicePathToStr(image->FilePath);
-	for (int i = StrLen(working_dir_path), skipped_last_component = 0; i--;) {
-		if (working_dir_path[i] == L'/' || working_dir_path[i] == L'\\') {
-			working_dir_path[i] = skipped_last_component++ ? L'\\' : L'\0';
+	Log(1, L"Successfully opened root directory. Root directory handle: 0x%p\n", root_dir);
+	
+	// Log file system info if available
+	EFI_FILE_SYSTEM_INFO* fs_info = NULL;
+	UINTN info_size = 0;
+	EFI_STATUS info_status = root_dir->GetInfo(root_dir, &gEfiFileSystemInfoGuid, &info_size, NULL);
+	if (info_status == EFI_BUFFER_TOO_SMALL) {
+		fs_info = (EFI_FILE_SYSTEM_INFO*)AllocatePool(info_size);
+		if (fs_info) {
+			info_status = root_dir->GetInfo(root_dir, &gEfiFileSystemInfoGuid, &info_size, fs_info);
+			if (!EFI_ERROR(info_status)) {
+				Log(1, L"File System Info:\n");
+				Log(1, L"  Size: %u\n", (UINT32)fs_info->Size);
+				Log(1, L"  Read-Only: %d\n", (int)fs_info->ReadOnly);
+				Log(1, L"  Volume Size: %llu\n", fs_info->VolumeSize);
+				Log(1, L"  Free Space: %llu\n", fs_info->FreeSpace);
+				Log(1, L"  Block Size: %u\n", fs_info->BlockSize);
+				Log(1, L"  Volume Label: %s\n", fs_info->VolumeLabel);
+			}
+			BS->FreePool(fs_info);
 		}
 	}
-	Log(config.debug, L"Working directory: %s\n", working_dir_path);
-	EFI_FILE_HANDLE working_dir;
+
+	CHAR16* default_dir_path = L"\\\\EFI\\\\HackBGRT";
+	Log(1, L"Default directory path: %s\n", default_dir_path);
+	EFI_FILE_HANDLE default_dir;
+	Log(1, L"Attempting to open default directory: %s\n", default_dir_path);
+	EFI_STATUS open_status = root_dir->Open(root_dir, &default_dir, default_dir_path, EFI_FILE_MODE_READ, 0);
+	if (EFI_ERROR(open_status)) {
+		Log(1, L"Failed to open HackBGRT default directory. Status: %r\n", status);
+		default_dir = root_dir;
+		Log(1, L"Using root directory as default directory: %p\n", default_dir);
+	} else {
+		Log(1, L"Successfully opened default directory: %p\n", default_dir);
+	}
+
+	// Get the full device path of the current image
+	CHAR16* full_path = (CHAR16*)DevicePathToStr(image->FilePath);
+	Log(1, L"Full image path: %s\n", full_path);
+	
+	// Extract the directory part of the path
+	CHAR16* working_dir_path = StrDup(full_path);
+	if (!working_dir_path) {
+		Log(1, L"Failed to allocate memory for working directory path\n");
+		goto fail;
+	}
+	
+	// Find the last path separator and truncate the string there
+	BOOLEAN found_separator = FALSE;
+	for (int i = StrLen(working_dir_path) - 1; i >= 0; i--) {
+		if (working_dir_path[i] == L'/' || working_dir_path[i] == L'\\') {
+			working_dir_path[i] = L'\\';  // Normalize to backslash
+			working_dir_path[i+1] = L'\0'; // Null-terminate the string
+			found_separator = TRUE;
+			break;
+		}
+	}
+	
+	if (!found_separator) {
+		// If no separator found, use root directory
+		working_dir_path[0] = L'\\';
+		working_dir_path[1] = L'\0';
+	}
+	
+	Log(1, L"Working directory path: %s\n", working_dir_path);
+	
+	EFI_FILE_HANDLE working_dir = NULL;
 	Log(1, L"Attempting to open working directory: %s\n", working_dir_path);
-	if (EFI_ERROR(root_dir->Open(root_dir, &working_dir, working_dir_path, EFI_FILE_MODE_READ, 0))) {
-		Log(1, L"Failed to open HackBGRT working directory. Falling back to default directory.\n");
+	status = root_dir->Open(root_dir, &working_dir, working_dir_path, EFI_FILE_MODE_READ, 0);
+	if (EFI_ERROR(status)) {
+		Log(1, L"Failed to open working directory. Status: %r\n", status);
+		Log(1, L"Falling back to default directory\n");
 		working_dir = default_dir;
 	} else {
-		Log(1, L"Successfully opened working directory: %s\n", working_dir_path);
+		Log(1, L"Successfully opened working directory: %p\n", working_dir);
 	}
+	
+	// Free the duplicated string
+	BS->FreePool(working_dir_path);
+	BS->FreePool(full_path);
 
 	EFI_FILE_HANDLE base_dir = working_dir;
 
@@ -483,6 +579,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *ST_) {
 	if (EFI_ERROR(BS->OpenProtocol(image_handle, TmpGuidPtr((EFI_GUID) EFI_SHELL_PARAMETERS_PROTOCOL_GUID), (void**) &shell_param_proto, 0, 0, EFI_OPEN_PROTOCOL_GET_PROTOCOL)) || shell_param_proto->Argc <= 1) {
 		const CHAR16* config_path = L"config.txt";
 		Log(1, L"No command line arguments provided, attempting to load config file: %s\n", config_path);
+		Log(1, L"Current base directory handle: 0x%p\n", base_dir);
 		retry_read_config:
 		Log(1, L"Attempting to read config file from base directory: %p\n", base_dir);
 		if (!ReadConfigFile(&config, base_dir, config_path)) {

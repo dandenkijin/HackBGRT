@@ -1,5 +1,6 @@
 # Executables and binaries
 *.efi
+*.efi.tmp
 *.exe
 *.o
 *.so
@@ -7,12 +8,21 @@
 *.lib
 *.dll
 *.dylib
+*.map
+*.bin
+*.img
+*.fd
 
 # Build directories
 /build/
 /obj/
 /bin/
 /lib/
+/efi/
+/efi-signed/
+/release/
+/test/
+*.d
 
 # IDE and editor files
 .vscode/
@@ -20,14 +30,51 @@
 *.swp
 *.swo
 *~
+*.sublime-*
+*.code-workspace
 
 # System files
 .DS_Store
 Thumbs.db
+*.orig
+*.rej
+*.bak
+*.tmp
 
 # Project specific
 src/GIT_DESCRIBE.cs
 html/
 .ccls-cache/
 HackBGRT.efi
-src/*.o
+hello.efi
+*.log
+*.log.*
+
+# Test files
+/test_*/
+*.qcow2
+*.vdi
+*.vmdk
+*.vhd
+
+# Local development
+.env
+.env.*
+!.env.example
+
+# Temporary files created during testing
+/tmp/
+/temp/
+
+# Linux installation scripts
+linux-install.sh
+linux-uninstall.sh
+
+# QEMU and OVMF related
+OVMF_*.fd
+
+# ccls cache
+.ccls-cache
+
+# gnu-efi build artifacts
+**/gnu-efi/*/gnuefi/gnu-efi.pc

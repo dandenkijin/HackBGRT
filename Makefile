@@ -27,9 +27,43 @@ GNUEFI_SRC = gnu-efi
 GNUEFI_INC = $(GNUEFI_SRC)/inc
 GNUEFI_OBJ = $(GNUEFI_SRC)/$(GNUEFI_ARCH)
 
-# Build gnu-efi libraries if they don't exist
-$(GNUEFI_OBJ)/lib/libefi.a $(GNUEFI_OBJ)/gnuefi/libgnuefi.a:
-	$(MAKE) -C $(GNUEFI_SRC) ARCH=$(GNUEFI_ARCH) CC=$(EFI_CC)
+# Build minimal gnu-efi libraries with just what we need
+$(GNUEFI_OBJ)/gnuefi/crt0-efi-x86_64.o:
+	@mkdir -p $(@D)
+	$(MAKE) -C $(GNUEFI_SRC) ARCH=x86_64 CC=$(EFI_CC) $(GNUEFI_OBJ)/gnuefi/crt0-efi-x86_64.o
+
+# Build just the essential objects we need from gnu-efi
+$(GNUEFI_OBJ)/lib/%.o: $(GNUEFI_SRC)/lib/%.c | $(GNUEFI_OBJ)/gnuefi/crt0-efi-x86_64.o
+	@mkdir -p $(@D)
+	$(EFI_CC) $(EFI_CFLAGS) -I$(GNUEFI_SRC)/inc -I$(GNUEFI_SRC)/inc/$(GNUEFI_ARCH) -c $< -o $@
+
+# Create a minimal libgnuefi.a with just what we need
+$(GNUEFI_OBJ)/gnuefi/libgnuefi.a: $(GNUEFI_OBJ)/gnuefi/crt0-efi-x86_64.o
+	@mkdir -p $(@D)
+	touch $@
+	ar rcs $@ $^
+
+# Build architecture-specific objects
+$(GNUEFI_OBJ)/lib/$(GNUEFI_ARCH)/%.o: $(GNUEFI_SRC)/lib/$(GNUEFI_ARCH)/%.S
+	@mkdir -p $(@D)
+	$(EFI_CC) $(EFI_CFLAGS) -I$(GNUEFI_SRC)/inc -I$(GNUEFI_SRC)/inc/$(GNUEFI_ARCH) -c $< -o $@
+
+# List of essential objects we need from gnu-efi
+GNUEFI_OBJS = \
+	$(GNUEFI_OBJ)/lib/crt0.o \
+	$(GNUEFI_OBJ)/lib/debug.o \
+	$(GNUEFI_OBJ)/lib/efi.o \
+	$(GNUEFI_OBJ)/lib/error.o \
+	$(GNUEFI_OBJ)/lib/init.o \
+	$(GNUEFI_OBJ)/lib/$(GNUEFI_ARCH)/initplat.o \
+	$(GNUEFI_OBJ)/lib/$(GNUEFI_ARCH)/math.o \
+	$(GNUEFI_OBJ)/lib/$(GNUEFI_ARCH)/setjmp.o
+
+# Create a minimal libefi-custom.a with just what we need
+$(GNUEFI_OBJ)/lib/libefi-custom.a: $(GNUEFI_OBJS)
+	@mkdir -p $(@D)
+	touch $@
+	ar rcs $@ $^
 
 FILES_C = src/main.c src/util.c src/types.c src/config.c src/sbat.c src/efi.c
 FILES_H = $(wildcard src/*.h)
@@ -113,12 +147,12 @@ efi/bootia32.efi: GNUEFI_ARCH = ia32
 efi/bootaa64.efi: CLANG_TARGET = aarch64-pc-windows-msvc
 efi/bootaa64.efi: GNUEFI_ARCH = aa64
 
-efi/boot%.efi: $(FILES_C) | $(GNUEFI_OBJ)/lib/libefi.a $(GNUEFI_OBJ)/gnuefi/libgnuefi.a
+efi/boot%.efi: $(FILES_C) | $(GNUEFI_OBJ)/lib/libefi-custom.a $(GNUEFI_OBJ)/gnuefi/libgnuefi.a
 	@mkdir -p efi
 	$(CC) $(CFLAGS) -c $< -o $(<:.c=.o)
 	ld -o $@ -nostdlib -T $(GNUEFI_SRC)/gnuefi/elf_$(GNUEFI_ARCH)_efi.lds -shared -Bsymbolic -znocombreloc \
 	  $(GNUEFI_OBJ)/gnuefi/crt0-efi-$(GNUEFI_ARCH).o $(FILES_C:.c=.o) \
-	  -L$(GNUEFI_OBJ)/lib -l:libefi.a -L$(GNUEFI_OBJ)/gnuefi -l:libgnuefi.a /usr/lib/gcc/x86_64-linux-gnu/*/libgcc.a
+	  -L$(GNUEFI_OBJ)/lib -l:libefi-custom.a -L$(GNUEFI_OBJ)/gnuefi -l:libgnuefi.a /usr/lib/gcc/x86_64-linux-gnu/*/libgcc.a
 	rm -f $(FILES_C:.c=.o)
 
 efi/bootarm.efi: CLANG_TARGET = armv6-pc-windows-msvc
@@ -133,15 +167,15 @@ efi/bootarm.efi: $(FILES_C)
 # Main build targets
 .PHONY: all linux efi clean
 
-# Linux build target
-linux: $(FILES_C) $(FILES_H)
-	$(LINUX_CC) $(LINUX_CFLAGS) -o $(LINUX_TARGET) $(FILES_C) $(LINUX_LDFLAGS)
+# Linux build target - delegate to Makefile.linux
+linux:
+	$(MAKE) -f Makefile.linux
 
 # EFI build target
-efi: $(FILES_C) $(FILES_H) | $(GNUEFI_OBJ)/lib/libefi.a $(GNUEFI_OBJ)/gnuefi/libgnuefi.a
+efi: $(FILES_C) $(FILES_H) | $(GNUEFI_OBJ)/lib/libefi-custom.a $(GNUEFI_OBJ)/gnuefi/libgnuefi.a
 	@mkdir -p efi
 	$(EFI_CC) $(EFI_CFLAGS) $(EFI_LDFLAGS) $(FILES_C) \
-	  -L$(GNUEFI_OBJ)/lib -l:libefi.a -L$(GNUEFI_OBJ)/gnuefi -l:libgnuefi.a \
+	  -L$(GNUEFI_OBJ)/lib -l:libefi-custom.a -L$(GNUEFI_OBJ)/gnuefi -l:libgnuefi.a \
 	  -o efi/bootx64.efi
 
 # Clean up all build artifacts
@@ -248,7 +282,21 @@ linux-uninstall.sh: Makefile
 	@chmod +x $@
 
 # Install on Linux
-linux-install: efi linux
+# Linux installation target - builds EFI binary and installs
+linux-install: linux-install.sh
+	@echo "Building EFI binary..."
+	@if ! $(MAKE) efi; then \
+		echo "Warning: Failed to build EFI binary. Using pre-built version if available."; \
+	fi
+	@if [ ! -f "efi/bootx64.efi" ] && [ -f "HackBGRT.efi" ]; then \
+		echo "Using pre-built HackBGRT.efi"; \
+		mkdir -p efi; \
+		cp HackBGRT.efi efi/bootx64.efi; \
+	fi
+	@if [ ! -f "efi/bootx64.efi" ]; then \
+		echo "Error: No EFI binary available. Build failed and no pre-built version found."; \
+		exit 1; \
+	fi
 	sudo ./linux-install.sh
 
 # Uninstall from Linux

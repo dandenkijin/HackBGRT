@@ -6,6 +6,36 @@ TEMP_DIR=$(mktemp -d)
 # Copy the OVMF_VARS file to the temporary directory to preserve changes
 cp /usr/share/ovmf/x64/OVMF_VARS.4m.fd "$TEMP_DIR/OVMF_VARS.fd"
 
+# Create necessary directories if they don't exist
+if [ ! -d "test_uefi/EFI/BOOT" ]; then
+    echo "Creating directory test_uefi/EFI/BOOT..."
+    mkdir -p "test_uefi/EFI/BOOT" || { echo "Failed to create directory"; exit 1; }
+fi
+
+# Copy the HackBGRT EFI binary to the BOOT directory
+if [ -f "HackBGRT.efi" ]; then
+    echo "Copying HackBGRT.efi to test_uefi/EFI/BOOT/BOOTX64.EFI..."
+    cp HackBGRT.efi test_uefi/EFI/BOOT/BOOTX64.EFI || { echo "Failed to copy HackBGRT.efi"; exit 1; }
+else
+    echo "Error: HackBGRT.efi not found in the current directory"
+    exit 1
+fi
+
+# Copy the configuration and logo files to the BOOT directory
+if [ -f "test_uefi/EFI/HackBGRT/config.txt" ]; then
+    echo "Copying config.txt to test_uefi/EFI/BOOT/..."
+    cp test_uefi/EFI/HackBGRT/config.txt test_uefi/EFI/BOOT/ || { echo "Failed to copy config.txt"; exit 1; }
+else
+    echo "Warning: config.txt not found in test_uefi/EFI/HackBGRT/"
+fi
+
+if [ -f "test_uefi/EFI/HackBGRT/logo.bmp" ]; then
+    echo "Copying logo.bmp to test_uefi/EFI/BOOT/..."
+    cp test_uefi/EFI/HackBGRT/logo.bmp test_uefi/EFI/BOOT/ || { echo "Failed to copy logo.bmp"; exit 1; }
+else
+    echo "Warning: logo.bmp not found in test_uefi/EFI/HackBGRT/"
+fi
+
 # Create a startup.nsh script to automatically run HackBGRT
 echo '\EFI\BOOT\BOOTX64.EFI' > test_uefi/startup.nsh
 
