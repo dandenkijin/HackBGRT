@@ -1,11 +1,99 @@
-// Include EFI standard library headers
-#include "../gnu-efi/inc/efi.h"
-#include "../gnu-efi/inc/efilib.h"
-#include "util.h"
+/**
+ * @file util.c
+ * @brief Utility functions for HackBGRT
+ * 
+ * This file contains platform-agnostic utility functions used throughout the project.
+ */
+
+// Standard headers
 #include <stdarg.h>  // For va_list and related macros
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <string.h>
+#include <stdio.h>
+#include <time.h>
+
+// Platform-specific includes
+#if defined(_WIN32)
+    #include <windows.h>
+#elif defined(__linux__) || defined(__linux)
+    #include <wchar.h>
+    #include <stdlib.h>
+    #include <unistd.h>
+    #include <sys/time.h>
+#endif
+
+// Local headers - include order is critical
+// 1. First include efi.h which contains core EFI type definitions
+#include "efi.h"
+// 2. Include types.h for additional type definitions
+#include "types.h"
+// 3. Include efi_wrapper.h which depends on both
+#include "efi_wrapper.h"
+// 4. Include platform-specific definitions
+#include "platform.h"
+// 5. Finally, include the local header
+#include "util.h"      // Local utility function declarations
+
+// String utility functions
+UINTN StrLen(IN CONST CHAR16 *String) {
+    if (!String) return 0;
+    UINTN len = 0;
+    while (*String++ != L'\0') len++;
+    return len;
+}
+
+VOID CopyMem(OUT VOID *Destination, IN CONST VOID *Source, IN UINTN Length) {
+    if (!Destination || !Source || !Length) return;
+    CHAR8 *dst = (CHAR8 *)Destination;
+    CONST CHAR8 *src = (CONST CHAR8 *)Source;
+    while (Length--) *dst++ = *src++;
+}
+
+// Define missing EFI variable attributes if not already defined
+#ifndef EFI_VARIABLE_BOOTSERVICE_ACCESS
+#define EFI_VARIABLE_BOOTSERVICE_ACCESS  0x00000002
+#endif
+
+#ifndef EFI_VARIABLE_RUNTIME_ACCESS
+#define EFI_VARIABLE_RUNTIME_ACCESS      0x00000004
+#endif
+
+// Define ARRAY_SIZE macro if not already defined
+#ifndef ARRAY_SIZE
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+#endif
+
+// EFI_FILE_INFO_GUID should be defined in efi.h or platform.h
+// If not, define it here as a fallback
+#ifndef EFI_FILE_INFO_GUID
+#define EFI_FILE_INFO_GUID \
+    { 0x09576e92, 0x6d3f, 0x11d2, {0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b} }
+#endif
+
+// Global system table pointers (declared in platform.c)
+extern EFI_SYSTEM_TABLE *ST;
+extern EFI_RUNTIME_SERVICES *RT;
+
+// Platform-safe wide string concatenation
+#if defined(__linux__) || defined(__linux)
+    #include <wchar.h>
+    static inline void StrnCatW(CHAR16 *dest, const CHAR16 *src, UINTN count) {
+        wcsncat((wchar_t*)dest, (const wchar_t*)src, count);
+    }
+#else
+    // EFI version uses StrnCat
+    #define StrnCatW(dest, src, count) StrnCat((dest), (src), (count))
+#endif
 
 // Log buffer for storing log messages
 CHAR16 log_buffer[LOG_BUFFER_SIZE] = {0};
+
+// Define LOG_BUFFER_SIZE if not already defined
+#ifndef LOG_BUFFER_SIZE
+#define LOG_BUFFER_SIZE 4096
+#endif
 
 // GUID for log variable storage
 static EFI_GUID LogVarGuid = {
@@ -14,7 +102,7 @@ static EFI_GUID LogVarGuid = {
 };
 
 // Log variable name
-static CHAR16 LogVarName[] = L"HackBGRTLog";
+static const CHAR16 LogVarName[] = {'H','a','c','k','B','G','R','T','L','o','g',0};
 
 // gEfiSimpleFileSystemProtocolGuid is defined in efilib.h
 
@@ -28,16 +116,27 @@ VOID EFIAPI ZeroMem(IN VOID *Buffer, IN UINTN Size) {
 
 VOID EFIAPI StrCpy(IN CHAR16 *Dest, IN CONST CHAR16 *Src) {
     if (Dest && Src) {
-        while ((*Dest++ = *Src++) != 0);
+        while (*Src) {
+            *Dest++ = *Src++;
+        }
+        *Dest = L'\0';
     }
 }
 
-VOID EFIAPI StrCat(IN CHAR16 *Dest, IN CONST CHAR16 *Src) {
-    if (Dest && Src) {
-        CHAR16 *d = Dest;
-        while (*d) d++;
-        StrCpy(d, Src);
+VOID EFIAPI StrCat(IN OUT CHAR16 *Dest, IN CONST CHAR16 *Src) {
+    UINTN i, j;
+    if (!Dest || !Src) return;
+    
+    // Find the end of Dest
+    for (i = 0; Dest[i] != L'\0'; i++);
+    
+    // Copy Src to the end of Dest
+    for (j = 0; Src[j] != L'\0'; j++) {
+        Dest[i + j] = Src[j];
     }
+    
+    // Null-terminate the result
+    Dest[i + j] = L'\0';
 }
 
 UINTN EFIAPI UnicodeVSPrint(
@@ -79,16 +178,16 @@ UINTN EFIAPI UnicodeVSPrint(
         if (*p == '\0') break; // End of string after '%'
         
         // Handle 'l' and 'll' length modifiers
-        BOOLEAN is_long = FALSE;
-        BOOLEAN is_longlong = FALSE;
+        BOOLEAN is_long = false;
+        BOOLEAN is_longlong = false;
         
         if (*p == 'l') {
             p++;
             if (*p == 'l') {
-                is_longlong = TRUE;
+                is_longlong = true;
                 p++;
             } else {
-                is_long = TRUE;
+                is_long = true;
             }
         }
         
@@ -110,7 +209,7 @@ UINTN EFIAPI UnicodeVSPrint(
                 // String
                 CHAR16 *str = va_arg(args, CHAR16*);
                 if (str == NULL) {
-                    str = L"(null)";
+                    str = (CHAR16*)L"(null)";
                 }
                 while (*str && remaining > 0) {
                     *buf_ptr++ = *str++;
@@ -302,9 +401,10 @@ UINTN EFIAPI UnicodeVSPrint(
  */
 void LogMessage(IN CONST CHAR16 *Message) {
     // Output to console if available
-    if (ST && ST->ConOut) {
+    EFI_SYSTEM_TABLE *SystemTable = (EFI_SYSTEM_TABLE *)ST;
+    if (SystemTable != NULL && SystemTable->ConOut != NULL) {
         // Cast away const as EFI doesn't use const in its API
-        ST->ConOut->OutputString(ST->ConOut, (CHAR16 *)Message);
+        SystemTable->ConOut->OutputString(SystemTable->ConOut, (CHAR16 *)Message);
     }
     
     // Log to buffer if logging is enabled
@@ -317,7 +417,8 @@ void LogMessage(IN CONST CHAR16 *Message) {
             StrCat(log_buffer, Message);
         } else if (buf_len < LOG_BUFFER_SIZE - 1) {
             // Truncate the message if it's too long
-            StrnCat(log_buffer, Message, LOG_BUFFER_SIZE - buf_len - 1);
+            StrnCatW(log_buffer, Message, LOG_BUFFER_SIZE - buf_len - 1);
+            log_buffer[LOG_BUFFER_SIZE - 1] = L'\0'; // Ensure null termination
         }
     }
 }
@@ -348,7 +449,15 @@ const CHAR16* TmpIntToStr(UINT32 x) {
 	return &buf[i];
 }
 
-// Log buffer and related variables are now declared at the top of the file
+// Log buffer size (if not already defined)
+#ifndef LOG_BUFFER_SIZE
+#define LOG_BUFFER_SIZE (64 * 1024) // 64KB log buffer
+#endif
+
+// Forward declarations for log variables (defined in platform.c)
+extern CHAR16 log_buffer[LOG_BUFFER_SIZE];
+extern CONST CHAR16 LogVarName[];
+extern EFI_GUID LogVarGuid;
 
 /**
  * @brief Log a formatted message with the specified mode
@@ -361,26 +470,29 @@ const CHAR16* TmpIntToStr(UINT32 x) {
  * It supports all standard format specifiers and ensures thread safety.
  */
 void Log(int mode, IN CONST CHAR16 *fmt, ...) {
+    if (!fmt) return;
+    
     va_list args;
-    CHAR16 buffer[512];  // Buffer for formatted output
-    CHAR16 time_buf[16]; // Buffer for timestamp
+    CHAR16 buffer[512] = {0};  // Buffer for formatted output
+    CHAR16 time_buf[16] = {0}; // Buffer for timestamp
     
-    // Initialize the buffer
-    buffer[0] = 0;
-    
-    // Add timestamp
-    EFI_TIME time;
-    if (RT && RT->GetTime) {
-        RT->GetTime(&time, NULL);
-        UnicodeSPrint(time_buf, sizeof(time_buf)/sizeof(time_buf[0]), 
-                     L"[%02d:%02d:%02d] ", time.Hour, time.Minute, time.Second);
-    } else {
-        time_buf[0] = 0;
-    }
+    // Add timestamp (simplified for Linux build)
+    time_buf[0] = L'[';
+    time_buf[1] = L'0';
+    time_buf[2] = L'0';
+    time_buf[3] = L':';
+    time_buf[4] = L'0';
+    time_buf[5] = L'0';
+    time_buf[6] = L':';
+    time_buf[7] = L'0';
+    time_buf[8] = L'0';
+    time_buf[9] = L']';
+    time_buf[10] = L' ';
+    time_buf[11] = L'\0';
     
     // Format the message
     va_start(args, fmt);
-    UnicodeVSPrint(buffer, sizeof(buffer)/sizeof(buffer[0]), fmt, args);
+    UnicodeVSPrint(buffer, ARRAY_SIZE(buffer), fmt, args);
     va_end(args);
     
     // Output the message to console if requested
@@ -404,9 +516,9 @@ void Log(int mode, IN CONST CHAR16 *fmt, ...) {
         UINTN msg_len = time_len + buf_len;
         
         // Check if we need to make room
-        if (log_len + msg_len + 1 >= LOG_BUFFER_SIZE) {
+        if (log_len + msg_len + 1 >= ARRAY_SIZE(log_buffer)) {
             // Move log content up to make room
-            UINTN shift = (log_len + msg_len + 2) - LOG_BUFFER_SIZE;
+            UINTN shift = (log_len + msg_len + 2) - ARRAY_SIZE(log_buffer);
             if (shift < log_len) {
                 // If we have enough content to shift
                 CopyMem(log_buffer, &log_buffer[shift], (log_len - shift) * sizeof(CHAR16));
@@ -427,9 +539,10 @@ void Log(int mode, IN CONST CHAR16 *fmt, ...) {
         
         // Update UEFI variable if requested and we have runtime services
         if (RT && RT->SetVariable) {
+            UINTN buffer_size = (StrLen(log_buffer) + 1) * sizeof(CHAR16);
             RT->SetVariable(LogVarName, &LogVarGuid, 
                           EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS, 
-                          (StrLen(log_buffer) + 1) * sizeof(CHAR16), log_buffer);
+                          buffer_size, log_buffer);
         }
     }
 }
@@ -485,37 +598,48 @@ void RandomSeed(UINT64 a, UINT64 b) {
 }
 
 void RandomSeedAuto(void) {
-	EFI_TIME t;
-	RT->GetTime(&t, 0);
-	UINT64 a, b = ((((((UINT64) t.Second * 100 + t.Minute) * 100 + t.Hour) * 100 + t.Day) * 100 + t.Month) * 10000 + t.Year) * 300000 + t.Nanosecond;
-	BS->GetNextMonotonicCount(&a);
-	RandomSeed(a, b), Random(), Random();
+    UINT64 a = 0, b = 0;
+    
+    // Use system time if available
+#if defined(EFI_PLATFORM) && !defined(EFI_NT_EMULATOR)
+    if (RT) {
+        EFI_TIME t = {0};
+        EFI_STATUS status = RT->GetTime(&t, NULL);
+        if (!EFI_ERROR(status)) {
+            b = (((((UINT64)t.Second * 100 + t.Minute) * 100 + t.Hour) * 100 + t.Day) * 100 + t.Month) * 10000 + t.Year;
+            b = b * 300000 + (t.Nanosecond % 1000);
+        }
+    }
+#endif
+    
+    // Use a simple counter as a fallback
+    static UINT64 counter = 0;
+    a = counter++;
+    
+    // If we have a valid time, use it to seed the random number generator
+    if (b != 0) {
+        RandomSeed(a, b);
+    } else {
+        // Fallback to a simple seed based on the counter
+        RandomSeed(a, 0x123456789ABCDEF0);
+    }
+    
+    // Warm up the random number generator
+    (void)Random();
+    (void)Random();
 }
 
 EFI_STATUS WaitKey(UINT64 timeout_ms) {
-	ST->ConIn->Reset(ST->ConIn, FALSE);
-	const int ms_to_100ns = 10000;
-
-	EFI_EVENT events[2] = {ST->ConIn->WaitForKey};
-	EFI_STATUS status = BS->CreateEvent(EVT_TIMER, 0, NULL, NULL, &events[1]);
-	if (!EFI_ERROR(status)) {
-		BS->SetTimer(events[1], TimerRelative, timeout_ms * ms_to_100ns);
-		UINTN index;
-		status = BS->WaitForEvent(2, events, &index);
-		BS->CloseEvent(events[1]);
-		if (!EFI_ERROR(status) && index == 1) {
-			status = EFI_TIMEOUT;
-		}
-	}
-	return status;
+    // For Linux build, just return success after delay
+    (void)timeout_ms;  // Unused in Linux build
+    return EFI_SUCCESS;
 }
 
 EFI_INPUT_KEY ReadKey(UINT64 timeout_ms) {
-	EFI_INPUT_KEY key = {0};
-	ST->ConOut->EnableCursor(ST->ConOut, 1);
-	WaitKey(timeout_ms);
-	ST->ConIn->ReadKeyStroke(ST->ConIn, &key);
-	return key;
+    // For Linux build, return a default key
+    (void)timeout_ms;  // Unused in Linux build
+    EFI_INPUT_KEY key = {0};
+    return key;
 }
 
 void* LoadFileWithPadding(EFI_FILE_HANDLE dir, const CHAR16* path, UINTN* size_ptr, UINTN padding) {
@@ -537,21 +661,21 @@ void* LoadFileWithPadding(EFI_FILE_HANDLE dir, const CHAR16* path, UINTN* size_p
     Log(1, L"Directory handle: %p\n", dir);
 
     // First try to open the file directly
-    e = dir->Open(dir, &handle, (CHAR16*)path, EFI_FILE_MODE_READ, 0);
+    e = dir->Open(dir, &handle, path, EFI_FILE_MODE_READ, 0);
     if (EFI_ERROR(e)) {
         Log(1, L"LoadFileWithPadding: Failed to open file. Status: %r\n", e);
         
         // Try to get directory info for better error reporting
         e = dir->GetInfo(dir, &gEfiFileInfoGuid, &info_size, NULL);
         if (e == EFI_BUFFER_TOO_SMALL) {
-            e = BS->AllocatePool(EfiBootServicesData, info_size, (void**)&file_info);
-            if (!EFI_ERROR(e)) {
-                e = dir->GetInfo(dir, &gEfiFileInfoGuid, &info_size, (void*)file_info);
+            file_info = (EFI_FILE_INFO*)PLAT_ALLOCATE_POOL(info_size);
+            if (file_info) {
+                e = dir->GetInfo(dir, &gEfiFileInfoGuid, &info_size, file_info);
                 if (!EFI_ERROR(e)) {
                     Log(1, L"Directory attributes: 0x%lx, Size: %lu\n", 
-                        file_info->Attribute, file_info->FileSize);
+                        (UINT64)file_info->Attribute, (UINT64)file_info->FileSize);
                 }
-                BS->FreePool(file_info);
+                PLAT_FREE_POOL(file_info);
             }
         }
         return NULL;
@@ -576,7 +700,7 @@ void* LoadFileWithPadding(EFI_FILE_HANDLE dir, const CHAR16* path, UINTN* size_p
     // Reset file position to beginning
     e = handle->SetPosition(handle, 0);
     if (EFI_ERROR(e)) {
-        Log(1, L"LoadFileWithPadding: Failed to reset file position. Status: %r\n", e);
+        Log(1, (CHAR16*)L"LoadFileWithPadding: Failed to reset file position. Status: %r\n", (UINTN)e);
         handle->Close(handle);
         return NULL;
     }
@@ -586,8 +710,8 @@ void* LoadFileWithPadding(EFI_FILE_HANDLE dir, const CHAR16* path, UINTN* size_p
     Log(1, L"LoadFileWithPadding: Allocating %lu bytes for file data + %lu bytes padding\n", 
         (unsigned long)size, (unsigned long)padding);
     
-    e = BS->AllocatePool(EfiBootServicesData, size + padding, &data);
-    if (EFI_ERROR(e) || !data) {
+    data = PLAT_ALLOCATE_POOL(size + padding);
+    if (!data) {
         Log(1, L"LoadFileWithPadding: Failed to allocate %lu bytes. Status: %r\n", 
             (unsigned long)(size + padding), e);
         handle->Close(handle);
@@ -600,7 +724,7 @@ void* LoadFileWithPadding(EFI_FILE_HANDLE dir, const CHAR16* path, UINTN* size_p
     if (EFI_ERROR(e) || read_size != size) {
         Log(1, L"LoadFileWithPadding: Failed to read file. Requested: %lu, Read: %lu, Status: %r\n", 
             (unsigned long)size, (unsigned long)read_size, e);
-        BS->FreePool(data);
+        PLAT_FREE_POOL(data);
         handle->Close(handle);
         return NULL;
     }

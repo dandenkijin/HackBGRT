@@ -1,14 +1,33 @@
+/**
+ * @file util.h
+ * @brief Utility functions and macros for HackBGRT
+ * 
+ * This header provides platform-agnostic utility functions and macros
+ * used throughout the HackBGRT project.
+ */
+
 #ifndef _HACKBGRT_UTIL_H_
 #define _HACKBGRT_UTIL_H_
 
-#include "efi.h"  // Includes our local efi.h which includes gnu-efi headers
+// Include EFI types first to ensure all required types are defined
+#include "efi.h"
+
+// Forward declarations for EFI structures
+struct _EFI_SYSTEM_TABLE;
+struct _EFI_BOOT_SERVICES;
+struct _EFI_RUNTIME_SERVICES;
 
 // Log buffer for storing log messages
 extern CHAR16 log_buffer[65536];
 #define LOG_BUFFER_SIZE 65536
 
-// All necessary types are now defined in efi.h
-// We'll use the standard EFI types from there
+// Local implementation of UnicodeSPrint to avoid conflict with gnu-efi
+UINTN EFIAPI LocalUnicodeSPrint(
+    CHAR16 *StartOfBuffer,
+    UINTN BufferSize,
+    const CHAR16 *FormatString,
+    ...
+    );
 
 /**
  * Convert a short ASCII string to UCS2, store in a static array.
@@ -120,6 +139,14 @@ static inline UINT64 rotl(const UINT64 x, int k) {
  */
 extern UINT64 Random(void);
 
+/**
+ * Convert a wide character string to an integer.
+ * 
+ * @param s The string to convert (ASCII or wide char)
+ * @return UINTN The converted integer value
+ */
+extern UINTN Atoi(IN CONST CHAR16* s);
+
 
 /**
  * Seed the random number generator. Pass 0 and 0 to seed from the clock.
@@ -164,7 +191,7 @@ extern void* LoadFileWithPadding(EFI_FILE_HANDLE dir, const CHAR16* path, UINTN*
  */
 static inline void* LoadFile(EFI_FILE_HANDLE dir, const CHAR16* path, UINTN* size_ptr) {
     if (!path || !size_ptr) {
-        return NULL;
+        return nullptr;
     }
     return LoadFileWithPadding(dir, path, size_ptr, 0);
 }
@@ -185,5 +212,24 @@ static inline EFI_GUID* TmpGuidPtr(EFI_GUID guid) {
     result = guid;
     return &result;
 }
+
+/**
+ * Compare two wide character strings.
+ *
+ * @param s1 First string to compare
+ * @param s2 Second string to compare
+ * @return INTN Zero if the strings are equal, negative if s1 < s2, positive if s1 > s2
+ */
+INTN EFIAPI StrCmp(IN CONST CHAR16* s1, IN CONST CHAR16* s2);
+
+/**
+ * Compare two wide character strings up to a specified length.
+ *
+ * @param s1 First string to compare
+ * @param s2 Second string to compare
+ * @param len Maximum number of characters to compare
+ * @return INTN Zero if the strings are equal, negative if s1 < s2, positive if s1 > s2
+ */
+INTN EFIAPI StrnCmp(IN CONST CHAR16* s1, IN CONST CHAR16* s2, IN UINTN len);
 
 #endif /* _HACKBGRT_UTIL_H_ */

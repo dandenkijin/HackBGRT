@@ -1,26 +1,81 @@
 # Linux Makefile for HackBGRT
-# This is a simplified Makefile for building HackBGRT on Linux
+# This Makefile builds the Linux version of HackBGRT
 
-# Compiler and flags
+# Target architecture (x86_64, i686)
+ARCH ?= x86_64
+
+# Toolchain - Using native Linux toolchain
 CC = gcc
-CFLAGS = -std=c17 -Wall -Wextra -Wno-error=sign-compare -I. -I./src -I/usr/include/efi -I/usr/include/efi/x86_64 -I/usr/include/efi/protocol
-LDFLAGS = -L/usr/lib -lefivar -lefi
-TARGET = hackbgrt-linux
+LD = ld
+OBJCOPY = objcopy
+
+# Paths - Use local gnu-efi submodule for headers
+GNUEFI_PATH = $(shell pwd)/gnu-efi
+EFI_INC = $(GNUEFI_PATH)/inc
+EFI_ARCH_INC = $(GNUEFI_PATH)/inc/$(ARCH)
+EFI_PROTOCOL_INC = $(GNUEFI_PATH)/inc/protocol
+
+# Try to use system gnu-efi, fall back to local
+ifneq ($(shell pkg-config --exists gnu-efi && echo 1),)
+    # Use system gnu-efi
+    GNUEFI_CFLAGS := $(shell pkg-config --cflags gnu-efi)
+    GNUEFI_LDFLAGS := $(shell pkg-config --libs gnu-efi)
+    $(info Using system gnu-efi)
+else
+    # Fall back to local gnu-efi
+    GNUEFI_CFLAGS := -I$(GNUEFI_PATH)/inc -I$(GNUEFI_PATH)/inc/$(ARCH) \
+                    -I$(GNUEFI_PATH)/inc/protocol -I$(GNUEFI_PATH)/inc/gnuefi
+    GNUEFI_LDFLAGS := -L$(GNUEFI_PATH)/$(ARCH)/lib -L$(GNUEFI_PATH)/$(ARCH)/gnuefi
+    $(info Using local gnu-efi from submodule)
+endif
+
+# Common flags
+CFLAGS = -Wall -Wextra -Werror \
+         -Wno-sign-compare \
+         -Wno-unused-parameter \
+         -fPIC \
+         -D_FILE_OFFSET_BITS=64 \
+         -D__LINUX__ \
+         -D__MAKEWITH_GNUEFI \
+         -I. -I./src \
+         $(GNUEFI_CFLAGS) \
+         -ffreestanding \
+         -fno-stack-protector \
+         -fshort-wchar \
+         -mno-red-zone \
+         -DGNU_EFI_USE_MS_ABI=1
 
 # Source files
-FILES_C = src/main.c src/util.c src/types.c src/config.c src/sbat.c src/efi.c
+FILES_C = $(filter-out src/globals.c,$(wildcard src/*.c))
 FILES_H = $(wildcard src/*.h)
+LOCAL_OBJS = $(FILES_C:.c=.o)
+GNUEFI_OBJS = src/globals.o
+OBJS = $(LOCAL_OBJS) $(GNUEFI_OBJS)
+TARGET = hackbgrt-linux
+
+# Linker flags
+LDFLAGS = -Wl,--as-needed \
+          -Wl,--gc-sections \
+          -Wl,-Map=HackBGRT-linux.map \
+          $(GNUEFI_LDFLAGS) \
+          -lefivar \
+          -lz \
+          -lgcc
 
 # Default target
 all: $(TARGET)
 
 # Main build rule
-$(TARGET): $(FILES_C) $(FILES_H)
-	$(CC) $(CFLAGS) -o $@ $(FILES_C) $(LDFLAGS)
+$(TARGET): $(OBJS)
+	$(CC) -o $@ $^ $(LDFLAGS)
+
+# Compile .c to .o
+%.o: %.c $(FILES_H)
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 # Clean build artifacts
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) $(OBJS)
 
 # Install target (requires root)
 install: $(TARGET)

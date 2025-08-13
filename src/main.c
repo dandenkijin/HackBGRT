@@ -3,26 +3,96 @@
 #include "efi.h"  // Includes our local efi.h which includes gnu-efi headers
 #include "types.h"
 #include "config.h"
+#include "log.h"
+#include "platform.h"
+#include "bmp.h"
+#include "acpi.h"
+#include "graphics.h"
+// ACPI Table GUIDs
+static EFI_GUID ACPI_TABLE_GUID = {0xeb9d2d30, 0x2d88, 0x11d3, {0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d}}; // ACPI Table GUID
+static EFI_GUID ACPI_20_TABLE_GUID = {0x8868e871, 0xe4f1, 0x11d3, {0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81}}; // ACPI 2.0 Table GUID
+
+// Utility functions
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
+static void Log(IN CONST CHAR16 *Message) {
+    ST->ConOut->OutputString(ST->ConOut, (CHAR16 *)L"[HackBGRT] ");
+    ST->ConOut->OutputString(ST->ConOut, (CHAR16 *)Message);
+    ST->ConOut->OutputString(ST->ConOut, (CHAR16 *)L"\r\n");
+}
+
+static EFI_GUID* TmpGuidPtr(IN EFI_GUID *Guid) {
+    return Guid;
+}
+
+// EFI Locate Search Type
+typedef enum {
+    AllHandles,
+    ByRegisterNotify,
+    ByProtocol
+} EFI_LOCATE_SEARCH_TYPE;
+
+// String functions
+static UINTN StrLen(CONST CHAR16 *s) {
+    UINTN len = 0;
+    while (*s++) len++;
+    return len;
+}
+
+static VOID CopyMem(VOID *dest, CONST VOID *src, UINTN len) {
+    CHAR8 *d = dest;
+    CONST CHAR8 *s = src;
+    while (len--) *d++ = *s++;
+}
+
+// GOP helper function
+static EFI_GRAPHICS_OUTPUT_PROTOCOL *GetGOP(VOID) {
+    static EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
+    if (!gop) {
+        EFI_GUID gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
+        EFI_HANDLE *handles = NULL;
+        UINTN count = 0;
+        EFI_STATUS status;
+
+        status = BS->LocateHandleBuffer(
+            ByProtocol,
+            &gop_guid,
+            NULL,
+            &count,
+            &handles
+        );
+
+        if (!EFI_ERROR(status) && count > 0) {
+            BS->HandleProtocol(
+                handles[0],
+                &gop_guid,
+                (VOID **)&gop
+            );
+        }
+        if (handles) BS->FreePool(handles);
+    }
+    return gop;
+}
 
 // Helper function to duplicate a string
 static CHAR16* StrDup(const CHAR16* src) {
     if (!src) return NULL;
     UINTN len = StrLen(src) + 1;
-    CHAR16* dst = AllocatePool(len * sizeof(CHAR16));
+    CHAR16* dst = PLAT_ALLOCATE_POOL(len * sizeof(CHAR16));
     if (dst) {
         // Cast away const for the source pointer since our CopyMem doesn't expect const
         CopyMem(dst, (VOID*)(UINTN)src, len * sizeof(CHAR16));
     }
     return dst;
 }
-#include "util.h"
 
 // Global system table pointers are now defined in globals.c
 
 // Forward declarations for local functions
 static void SetResolution(int w, int h);
 static EFI_GRAPHICS_OUTPUT_PROTOCOL* GOP(void);
-static EFI_HANDLE LoadApp(int print_failure, EFI_HANDLE image_handle, EFI_LOADED_IMAGE* image, const CHAR16* path);
+static EFIAPI EFI_HANDLE LoadApp(IN BOOLEAN print_failure, IN EFI_HANDLE image_handle, IN EFI_LOADED_IMAGE_PROTOCOL *image, IN CONST CHAR16 *path);
 static void HackBgrt(EFI_FILE_HANDLE base_dir);
 static ACPI_SDT_HEADER* CreateXsdt(ACPI_SDT_HEADER* xsdt0, UINTN entries);
 static ACPI_BGRT* HandleAcpiTables(HackBGRT_action action, ACPI_BGRT* bgrt);
@@ -53,7 +123,10 @@ static struct HackBGRT_config config = {
 static EFI_GRAPHICS_OUTPUT_PROTOCOL* GOP(void) {
 	static EFI_GRAPHICS_OUTPUT_PROTOCOL* gop;
 	if (!gop) {
-		LibLocateProtocol(TmpGuidPtr((EFI_GUID) EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID), (void**) &gop);
+		{
+			EFI_GUID GraphicsOutputProtocolGuid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
+			BS->LocateProtocol(&GraphicsOutputProtocolGuid, NULL, (void**) &gop);
+		}
 	}
 	return gop;
 }
@@ -73,7 +146,12 @@ static void SetResolution(int w, int h) {
 		}
 		config.old_resolution_x = config.resolution_x;
 		config.old_resolution_y = config.resolution_y;
-		Log(config.debug, L"GOP not found! Assuming resolution %dx%d.\n", config.resolution_x, config.resolution_y);
+		{
+			CHAR16* msg = (CHAR16*)PLAT_ALLOCATE_POOL(100);
+			UnicodeSPrint(msg, 100, L"GOP not found! Assuming resolution %d x %d.\n", config.resolution_x, config.resolution_y);
+			Log(config.debug, msg);
+			PLAT_FREE_POOL(msg);
+		}
 		return;
 	}
 	UINTN best_i = gop->Mode->Mode;
@@ -82,7 +160,12 @@ static void SetResolution(int w, int h) {
 	w = (w <= 0 ? w < 0 ? best_w : 999999 : w);
 	h = (h <= 0 ? h < 0 ? best_h : 999999 : h);
 
-	Log(config.debug, L"Looking for resolution %dx%d...\n", w, h);
+	{
+		CHAR16* msg = (CHAR16*)PLAT_ALLOCATE_POOL(100);
+		UnicodeSPrint(msg, 100, L"Looking for resolution %d x %d...\n", w, h);
+		Log(config.debug, msg);
+		PLAT_FREE_POOL(msg);
+	}
 	for (UINT32 i = gop->Mode->MaxMode; i--;) {
 		int new_w = 0, new_h = 0;
 
@@ -92,15 +175,15 @@ static void SetResolution(int w, int h) {
 			continue;
 		}
 		if (info_size < sizeof(*info)) {
-			BS->FreePool(info);
+			PLAT_FREE_POOL(info);
 			continue;
 		}
 		new_w = info->HorizontalResolution;
 		new_h = info->VerticalResolution;
-		BS->FreePool(info);
+		PLAT_FREE_POOL(info);
 
 		// Sum of missing w/h should be minimal.
-		int new_missing = max(w - new_w, 0) + max(h - new_h, 0);
+		int new_missing = (w > new_w ? w - new_w : 0) + (h > new_h ? h - new_h : 0);
 		int best_missing = max(w - best_w, 0) + max(h - best_h, 0);
 		if (new_missing > best_missing) {
 			continue;
@@ -115,7 +198,12 @@ static void SetResolution(int w, int h) {
 		best_h = new_h;
 		best_i = i;
 	}
-	Log(config.debug, L"Found resolution %dx%d.\n", best_w, best_h);
+	{
+		CHAR16* msg = (CHAR16*)PLAT_ALLOCATE_POOL(100);
+		SPrint(msg, 100, L"Found resolution %d x %d.\n", best_w, best_h);
+		Log(config.debug, msg);
+		PLAT_FREE_POOL(msg);
+	}
 	config.resolution_x = best_w;
 	config.resolution_y = best_h;
 	if (best_i != gop->Mode->Mode) {
@@ -130,16 +218,16 @@ static void SetResolution(int w, int h) {
  * @param entries The number of SDT entries.
  * @return Pointer to a new XSDT.
  */
-ACPI_SDT_HEADER* CreateXsdt(ACPI_SDT_HEADER* xsdt0, UINTN entries) {
+static ACPI_SDT_HEADER* CreateXsdt(ACPI_SDT_HEADER* xsdt0, UINTN entries) {
 	ACPI_SDT_HEADER* xsdt = 0;
 	UINT32 xsdt_len = sizeof(ACPI_SDT_HEADER) + entries * sizeof(UINT64);
-	BS->AllocatePool(EfiACPIReclaimMemory, xsdt_len, (void**)&xsdt);
+	xsdt = PLAT_ALLOCATE_POOL(xsdt_len);
 	if (!xsdt) {
-		Log(1, L"Failed to allocate memory for XSDT.\n");
+		Log(1, L"Failed to allocate memory for XSDT.");
 		return 0;
 	}
 	BS->SetMem(xsdt, xsdt_len, 0);
-	BS->CopyMem(xsdt, xsdt0, min(xsdt0->length, xsdt_len));
+	BS->CopyMem(xsdt, xsdt0, (xsdt0->length < xsdt_len ? xsdt0->length : xsdt_len));
 	xsdt->length = xsdt_len;
 	SetAcpiSdtChecksum(xsdt);
 	return xsdt;
@@ -166,7 +254,12 @@ static ACPI_BGRT* HandleAcpiTables(HackBGRT_action action, ACPI_BGRT* bgrt) {
 		if (CompareMem(rsdp->signature, "RSD PTR ", 8) != 0 || rsdp->revision < 2 || !VerifyAcpiRsdp2Checksums(rsdp)) {
 			continue;
 		}
-		Log(config.debug, L"RSDP @%x: revision = %d, OEM ID = %s\n", (UINTN)rsdp, rsdp->revision, TmpStr(rsdp->oem_id, 6));
+		{
+			CHAR16* oem_id = (CHAR16*)PLAT_ALLOCATE_POOL(12 * sizeof(CHAR16));
+			UnicodeSPrint(oem_id, 12, L"%a", rsdp->oem_id);
+			Log(config.debug, L"RSDP @%x: revision = %d, OEM ID = %s", (UINTN)rsdp, rsdp->revision, oem_id);
+			PLAT_FREE_POOL(oem_id);
+		}
 
 		ACPI_SDT_HEADER* xsdt = (ACPI_SDT_HEADER *) (UINTN) rsdp->xsdt_address;
 		if (!xsdt || CompareMem(xsdt->signature, "XSDT", 4) != 0 || !VerifyAcpiSdtChecksum(xsdt)) {
@@ -175,6 +268,7 @@ static ACPI_BGRT* HandleAcpiTables(HackBGRT_action action, ACPI_BGRT* bgrt) {
 		}
 		UINT64* entry_arr = (UINT64*)&xsdt[1];
 		UINT32 entry_arr_length = (xsdt->length - sizeof(*xsdt)) / sizeof(UINT64);
+		UINT32 new_entry_count = entry_arr_length;
 
 		Log(config.debug, L"* XSDT @%x: OEM ID = %s, entry count = %d\n", (UINTN)xsdt, TmpStr(xsdt->oem_id, 6), entry_arr_length);
 
@@ -197,9 +291,8 @@ static ACPI_BGRT* HandleAcpiTables(HackBGRT_action action, ACPI_BGRT* bgrt) {
 					for (int k = j+1; k < entry_arr_length; ++k) {
 						entry_arr[k-1] = entry_arr[k];
 					}
-					--entry_arr_length;
-					entry_arr[entry_arr_length] = 0;
-					xsdt->length -= sizeof(entry_arr[0]);
+					--new_entry_count;
+					entry_arr[new_entry_count] = 0;
 					--j;
 					break;
 				case HackBGRT_REPLACE:
@@ -208,13 +301,27 @@ static ACPI_BGRT* HandleAcpiTables(HackBGRT_action action, ACPI_BGRT* bgrt) {
 			}
 			bgrt_count += 1;
 		}
+		if (action == HackBGRT_REMOVE && new_entry_count < entry_arr_length) {
+			Log(config.debug, L"Shrinking XSDT from %d to %d entries\n", entry_arr_length, new_entry_count);
+			ACPI_SDT_HEADER* new_xsdt = CreateXsdt(xsdt, new_entry_count);
+			if (new_xsdt) {
+				PLAT_FREE_POOL(xsdt);
+				xsdt = new_xsdt;
+				rsdp->xsdt_address = (UINTN)xsdt;
+				SetAcpiRsdp2Checksums(rsdp);
+			}
+		}
 		if (!bgrt_count && action == HackBGRT_REPLACE && bgrt) {
 			Log(config.debug, L" - Adding missing BGRT.\n");
-			xsdt = CreateXsdt(xsdt, entry_arr_length + 1);
-			entry_arr = (UINT64*)&xsdt[1];
-			entry_arr[entry_arr_length++] = (UINTN) bgrt;
-			rsdp->xsdt_address = (UINTN) xsdt;
-			SetAcpiRsdp2Checksums(rsdp);
+			ACPI_SDT_HEADER* new_xsdt = CreateXsdt(xsdt, entry_arr_length + 1);
+			if (new_xsdt) {
+				PLAT_FREE_POOL(xsdt);
+				xsdt = new_xsdt;
+				entry_arr = (UINT64*)&xsdt[1];
+				entry_arr[entry_arr_length++] = (UINTN) bgrt;
+				rsdp->xsdt_address = (UINTN) xsdt;
+				SetAcpiRsdp2Checksums(rsdp);
+			}
 		}
 		SetAcpiSdtChecksum(xsdt);
 	}
@@ -233,7 +340,7 @@ static ACPI_BGRT* HandleAcpiTables(HackBGRT_action action, ACPI_BGRT* bgrt) {
  */
 static BMP* MakeBMP(int w, int h, UINT8 r, UINT8 g, UINT8 b) {
 	BMP* bmp = 0;
-	BS->AllocatePool(EfiBootServicesData, 54 + w * h * 4, (void**) &bmp);
+	bmp = PLAT_ALLOCATE_POOL(54 + w * h * 4);
 	if (!bmp) {
 		Log(1, L"Failed to allocate a blank BMP!\n");
 		BS->Stall(1000000);
@@ -284,7 +391,7 @@ static BMP* LoadBMP(EFI_FILE_HANDLE base_dir, const CHAR16* path) {
 		&& bmp->compression == 0) {
 			return bmp;
 		}
-		BS->FreePool(bmp);
+		PLAT_FREE_POOL(bmp);
 		Log(1, L"Invalid BMP (%s)!\n", path);
 	} else {
 		Log(1, L"Failed to load BMP (%s)!\n", path);
@@ -351,7 +458,7 @@ void HackBgrt(EFI_FILE_HANDLE base_dir) {
 			return;
 		}
 		// Replace missing = allocate new.
-		BS->AllocatePool(EfiACPIReclaimMemory, sizeof(*bgrt), (void**)&bgrt);
+		bgrt = PLAT_ALLOCATE_POOL_WITH_TYPE(ACPI_BGRT, 1);
 		if (!bgrt) {
 			Log(1, L"Failed to allocate memory for BGRT.\n");
 			return;
@@ -420,17 +527,34 @@ void HackBgrt(EFI_FILE_HANDLE base_dir) {
 /**
  * Load an application.
  */
-static EFI_HANDLE LoadApp(int print_failure, EFI_HANDLE image_handle, EFI_LOADED_IMAGE* image, const CHAR16* path) {
-	EFI_DEVICE_PATH* boot_dp = FileDevicePath(image->DeviceHandle, (CHAR16*) path);
-	EFI_HANDLE result = 0;
-	Log(config.debug, L"Loading application %s.\n", path);
-	if (EFI_ERROR(BS->LoadImage(0, image_handle, boot_dp, 0, 0, &result))) {
-		Log(config.debug || print_failure, L"Failed to load application %s.\n", path);
-	}
-	return result;
+static EFIAPI EFI_HANDLE LoadApp(
+    IN BOOLEAN print_failure,
+    IN EFI_HANDLE image_handle,
+    IN EFI_LOADED_IMAGE_PROTOCOL *image,
+    IN CONST CHAR16 *path
+) {
+    EFI_DEVICE_PATH *boot_dp = FileDevicePath(image->DeviceHandle, (CHAR16 *)path);
+    EFI_HANDLE result = NULL;
+    EFI_STATUS status;
+    
+    Log(config.debug, L"Loading application %s.\n", path);
+    
+    status = BS->LoadImage(
+        FALSE,              // BootPolicy
+        image_handle,       // ParentImageHandle
+        boot_dp,            // DevicePath
+        NULL,               // SourceBuffer
+        0,                  // SourceSize
+        &result             // ImageHandle
+    );
+    
+    if (EFI_ERROR(status)) {
+        Log(config.debug || print_failure, L"Failed to load application %s. Status: %r\n", path, status);
+        return NULL;
+    }
+    
+    return result;
 }
-
-/**
  * The main program.
  */
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *ST_) {
@@ -439,20 +563,31 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *ST_) {
 	BS = ST_->BootServices;
 	RT = ST_->RuntimeServices;
 
+	// Set up logging
+	LogInit();
+	Log(1, L"HackBGRT starting...\n");
+
 	// Clear the screen to wipe the vendor logo.
-	ST->ConOut->EnableCursor(ST->ConOut, 0);
-	ST->ConOut->ClearScreen(ST->ConOut);
+	ST_->ConOut->EnableCursor(ST_->ConOut, 0);
+	ST_->ConOut->ClearScreen(ST_->ConOut);
 
 	// Log version information
 	Log(1, L"HackBGRT version: %s\n", version);
+	Log(1, L"System Table: 0x%p\n", ST_);
 	Log(1, L"System Table: 0x%p\n", ST);
 	Log(1, L"Boot Services: 0x%p\n", BS);
 	Log(1, L"Runtime Services: 0x%p\n", RT);
 	Log(1, L"Image Handle: 0x%p\n", image_handle);
 
 	// Get the loaded image protocol for the current image
-	EFI_LOADED_IMAGE* image = NULL;
-	EFI_STATUS status = BS->HandleProtocol(image_handle, TmpGuidPtr((EFI_GUID) EFI_LOADED_IMAGE_PROTOCOL_GUID), (void**) &image);
+	EFI_LOADED_IMAGE_PROTOCOL *image = NULL;
+	EFI_GUID loaded_image_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
+	EFI_STATUS status = BS->HandleProtocol(
+		image_handle,
+		&loaded_image_guid,
+		(VOID **)&image
+	);
+
 	if (EFI_ERROR(status)) {
 		Log(1, L"Failed to get LOADED_IMAGE_PROTOCOL. Status: %r\n", status);
 		goto fail;
@@ -464,30 +599,41 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *ST_) {
 		CHAR16* file_path_str = DevicePathToStr(image->FilePath);
 		Log(1, L"  File Path: %s\n", file_path_str ? file_path_str : L"(null)");
 		if (file_path_str) {
-			BS->FreePool(file_path_str);
+			PLAT_FREE_POOL(file_path_str);
 		}
 	} else {
 		Log(1, L"  File Path: (null)\n");
 	}
 
 	// Get the file system protocol
-	EFI_FILE_IO_INTERFACE* io = NULL;
-	status = BS->HandleProtocol(image->DeviceHandle, TmpGuidPtr((EFI_GUID) EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID), (void**) &io);
+	EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs = NULL;
+	EFI_GUID fs_guid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
+	status = BS->HandleProtocol(
+		image->DeviceHandle,
+		&fs_guid,
+		(VOID **)&fs
+	);
+
 	if (EFI_ERROR(status)) {
 		Log(1, L"Failed to get FILE_SYSTEM_PROTOCOL. Status: %r\n", status);
 		Log(1, L"Device Handle: 0x%p\n", image->DeviceHandle);
 		// Try to get the device path for better error reporting
-		EFI_DEVICE_PATH* dev_path = NULL;
-		if (!EFI_ERROR(BS->HandleProtocol(image->DeviceHandle, TmpGuidPtr((EFI_GUID) EFI_DEVICE_PATH_PROTOCOL_GUID), (void**)&dev_path))) {
-			Log(1, L"Device Path: %s\n", DevicePathToStr(dev_path));
+		EFI_DEVICE_PATH *dev_path = NULL;
+		EFI_GUID dev_path_guid = EFI_DEVICE_PATH_PROTOCOL_GUID;
+		if (!EFI_ERROR(BS->HandleProtocol(image->DeviceHandle, &dev_path_guid, (void**)&dev_path))) {
+			CHAR16 *path_str = DevicePathToStr(dev_path);
+			Log(1, L"Device Path: %s\n", path_str ? path_str : L"(null)");
+			if (path_str) {
+				BS->FreePool(path_str);
+			}
 		}
 		goto fail;
 	}
-	Log(1, L"File System Protocol: 0x%p\n", io);
+	Log(1, L"File System Protocol: 0x%p\n", fs);
 
 	// Open the root directory of the file system
-	EFI_FILE_HANDLE root_dir = NULL;
-	status = io->OpenVolume(io, &root_dir);
+	EFI_FILE_PROTOCOL *root_dir = NULL;
+	status = fs->OpenVolume(fs, &root_dir);
 	if (EFI_ERROR(status)) {
 		Log(1, L"Failed to open root directory. Status: %r\n", status);
 		goto fail;
@@ -499,7 +645,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *ST_) {
 	UINTN info_size = 0;
 	EFI_STATUS info_status = root_dir->GetInfo(root_dir, &gEfiFileSystemInfoGuid, &info_size, NULL);
 	if (info_status == EFI_BUFFER_TOO_SMALL) {
-		fs_info = (EFI_FILE_SYSTEM_INFO*)AllocatePool(info_size);
+		fs_info = (EFI_FILE_SYSTEM_INFO*)PLAT_ALLOCATE_POOL(info_size);
 		if (fs_info) {
 			info_status = root_dir->GetInfo(root_dir, &gEfiFileSystemInfoGuid, &info_size, fs_info);
 			if (!EFI_ERROR(info_status)) {
@@ -511,7 +657,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *ST_) {
 				Log(1, L"  Block Size: %u\n", fs_info->BlockSize);
 				Log(1, L"  Volume Label: %s\n", fs_info->VolumeLabel);
 			}
-			BS->FreePool(fs_info);
+			PLAT_FREE_POOL(fs_info);
 		}
 	}
 
@@ -570,8 +716,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *ST_) {
 	}
 	
 	// Free the duplicated string
-	BS->FreePool(working_dir_path);
-	BS->FreePool(full_path);
+	PLAT_FREE_POOL(working_dir_path);
+	PLAT_FREE_POOL(full_path);
 
 	EFI_FILE_HANDLE base_dir = working_dir;
 

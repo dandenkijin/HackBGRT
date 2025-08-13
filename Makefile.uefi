@@ -46,8 +46,7 @@ CFLAGS = -Wall -Wextra -Werror \
          -mno-avx \
          -maccumulate-outgoing-args \
          -DEFI_FUNCTION_WRAPPER \
-         -DGNU_EFI_USE_MS_ABI \
-         -D__MAKEWITH_GNUEFI
+         -DGNU_EFI_USE_MS_ABI
 
 # Our local source files (exclude globals.c as it's included separately)
 SRCS = $(filter-out src/globals.c,$(wildcard src/*.c))
@@ -64,10 +63,8 @@ EFI_CRT_OBJ = $(GNUEFI_PATH)/$(EFI_ARCH)/gnuefi/crt0-efi-x86_64.o
 
 # Use local implementations instead of gnu-efi versions
 EFI_LIBS = -Wl,--whole-archive \
-           -lgnuefi \
-           -Wl,--no-whole-archive \
-           -Wl,--exclude-libs=libefi.a \
-           -Wl,--exclude-libs=libgnuefi.a
+           -lgnuefi -lefi \
+           -Wl,--no-whole-archive
 
 EFI_LDS = $(GNUEFI_PATH)/gnuefi/elf_x86_64_efi.lds
 
@@ -103,16 +100,16 @@ TARGET = HackBGRT.efi hello.efi
 all: $(TARGET)
 
 # Build the EFI application
-HackBGRT.efi: $(OBJS)
-	$(CC) -o $@.tmp $^ $(LDFLAGS)
+HackBGRT.efi: $(OBJS) $(EFI_CRT_OBJ)
+	$(CC) $(LDFLAGS) -o $@.tmp $(EFI_CRT_OBJ) $^
 	$(OBJCOPY) -R .comment $@.tmp $@
 	@rm -f $@.tmp
 
 # Test application
 HELLO_OBJS = hello.o hello_support.o src/util.o src/efi.o src/config.o src/globals.o src/efi_print.o src/efi_guids.o
 
-hello.efi: $(HELLO_OBJS)
-	$(CC) -nostdlib -Wl,-dll -shared -Wl,--subsystem,10 -e efi_main -o $@.tmp $^ $(LIBS)
+hello.efi: $(HELLO_OBJS) $(EFI_CRT_OBJ)
+	$(CC) $(LDFLAGS) -o $@.tmp $(EFI_CRT_OBJ) $^
 	$(OBJCOPY) -R .comment $@.tmp $@
 	@rm -f $@.tmp
 

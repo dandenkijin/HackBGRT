@@ -1,17 +1,26 @@
 #include "efi.h"
 #include "util.h"
+#include "platform.h"  // For platform-specific macros
 
-// Implementation of AllocatePool that matches gnu-efi's signature
-VOID *EFIAPI AllocatePool(IN UINTN Size) {
+// Only include our implementations when not using gnu-efi's
+#ifndef __MAKEWITH_GNUEFI
+
+// Local implementation of AllocatePool to avoid symbol conflicts
+VOID *EFIAPI LocalAllocatePool(IN UINTN Size) {
     VOID *Buffer = NULL;
     if (BS && BS->AllocatePool) {
         EFI_STATUS Status = BS->AllocatePool(EfiLoaderData, Size, &Buffer);
-        if (EFI_ERROR(Status)) {
+        if (EFI_ERROR(Status) || !Buffer) {
             return NULL;
         }
     }
     return Buffer;
 }
+
+#else
+// When using gnu-efi, we still need to define BS for our implementations
+extern EFI_BOOT_SERVICES *BS;
+#endif // !__MAKEWITH_GNUEFI
 
 // Implementation of CopyMem that matches gnu-efi's signature
 VOID EFIAPI CopyMem(IN VOID *Destination, IN VOID *Source, IN UINTN Length) {
@@ -64,7 +73,8 @@ EFI_DEVICE_PATH *FileDevicePath(IN EFI_HANDLE Device OPTIONAL, IN CHAR16 *FileNa
 	UINTN size_fdp = SIZE_OF_FILEPATH_DEVICE_PATH + size_str;
 
 	EFI_DEVICE_PATH *new_path;
-	if (EFI_ERROR(BS->AllocatePool(EfiBootServicesData, old_path_size + instances * size_fdp, (void**)&new_path))) {
+	new_path = PLAT_ALLOCATE_POOL(old_path_size + instances * size_fdp);
+	if (!new_path) {
 		return 0;
 	}
 
@@ -102,7 +112,8 @@ CHAR16 *DevicePathToStr(EFI_DEVICE_PATH *DevPath) {
 	CHAR16* str;
 	UINTN size_str = (path_length + 1) * sizeof(*str);
 
-	if (!path_length || EFI_ERROR(BS->AllocatePool(EfiBootServicesData, size_str, (void**)&str))) {
+	str = PLAT_ALLOCATE_POOL(size_str);
+	if (!path_length || !str) {
 		return 0;
 	}
 

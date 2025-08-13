@@ -1,7 +1,7 @@
 #ifndef _HACKBGRT_CONFIG_H_
 #define _HACKBGRT_CONFIG_H_
 
-#include "efi.h"  // Includes our local efi.h which includes gnu-efi headers
+#include "efi_wrapper.h"  // Use our wrapper to ensure consistent type definitions
 
 /**
  * Possible actions to perform on the BGRT.
@@ -48,7 +48,7 @@ typedef struct HackBGRT_config {
  * @param base_dir The base directory, in case the parameter contains an include.
  * @param line The configuration line to parse.
  */
-extern void ReadConfigLine(HackBGRT_config* config, EFI_FILE_HANDLE base_dir, const CHAR16* line);
+extern void ReadConfigLine(HackBGRT_config* config, EFI_FILE_PROTOCOL* base_dir, const CHAR16* line);
 
 /**
  * Read a configuration file. (May recursively read more files.)
@@ -58,6 +58,6 @@ extern void ReadConfigLine(HackBGRT_config* config, EFI_FILE_HANDLE base_dir, co
  * @param path The path to the file.
  * @return FALSE, if the file couldn't be read, TRUE otherwise.
  */
-extern BOOLEAN ReadConfigFile(HackBGRT_config* config, EFI_FILE_HANDLE base_dir, const CHAR16* path);
+extern BOOLEAN ReadConfigFile(HackBGRT_config* config, EFI_FILE_PROTOCOL* base_dir, const CHAR16* path);
 
 #endif /* _HACKBGRT_CONFIG_H_ */

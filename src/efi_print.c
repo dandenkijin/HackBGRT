@@ -1,18 +1,55 @@
 /**
  * @file efi_print.c
- * @brief Local implementations of EFI print functions to avoid linking against gnu-efi's print.o
+ * @brief Platform-agnostic implementations of EFI print functions
  */
 
-#include <stdarg.h>
-#include "efi.h"  // Our local efi.h which includes gnu-efi headers
-
-// Define VA_START, VA_END, and va_list if not already defined
-#ifndef _VA_LIST_DEFINED
-#define _VA_LIST_DEFINED
-typedef __builtin_va_list va_list;
-#define VA_START(v, l) __builtin_va_start(v, l)
-#define VA_END(v)      __builtin_va_end(v)
-#define VA_ARG(v, l)   __builtin_va_arg(v, l)
+// Include platform-specific headers first
+#ifdef __MAKEWITH_GNUEFI
+    // For UEFI builds, use the standard gnu-efi headers
+    #include <efi.h>
+    #include <efilib.h>
+#else
+    // For Linux builds, use our platform abstraction
+    #include <stdarg.h>
+    #include <stddef.h>
+    #include <stdbool.h>
+    #include "efi.h"  // Our local efi.h with platform-agnostic types
+    
+    // Define EFIAPI macro if not defined
+    #ifndef EFIAPI
+    #define EFIAPI
+    #endif
+    
+    // Define EFI-style parameter annotations for Linux build
+    #ifndef IN
+    #define IN
+    #endif
+    
+    #ifndef OUT
+    #define OUT
+    #endif
+    
+    #ifndef OPTIONAL
+    #define OPTIONAL
+    #endif
+    
+    // Define BOOLEAN constants if not defined
+    #ifndef TRUE
+    #define TRUE 1
+    #endif
+    
+    #ifndef FALSE
+    #define FALSE 0
+    #endif
+    
+    // Define va_* macros if not already defined
+    #ifndef _VA_LIST_DEFINED
+    #define _VA_LIST_DEFINED
+    typedef __builtin_va_list va_list;
+    #define VA_START(v, l) __builtin_va_start(v, l)
+    #define VA_END(v)      __builtin_va_end(v)
+    #define VA_ARG(v, l)   __builtin_va_arg(v, l)
+    #endif
 #endif
 
 /**
@@ -20,7 +57,9 @@ typedef __builtin_va_list va_list;
  */
 static UINTN
 IntToStr(CHAR16 *buffer, INTN value, UINTN base, UINTN width, BOOLEAN zero_pad) {
-    CHAR16 temp[32];
+    // Buffer size must be large enough for 64-bit numbers in any base
+    #define MAX_NUM_STR_LEN 64
+    CHAR16 temp[MAX_NUM_STR_LEN];
     UINTN i = 0;
     UINTN len = 0;
     UINTN digit;
@@ -32,13 +71,18 @@ IntToStr(CHAR16 *buffer, INTN value, UINTN base, UINTN width, BOOLEAN zero_pad) 
         value = -value;
     }
     
+    // Ensure base is valid (2-36)
+    if (base < 2 || base > 36) {
+        base = 10;
+    }
+    
     // Handle 0 explicitly, otherwise empty string is printed
     if (value == 0) {
         temp[i++] = L'0';
     } else {
         // Generate digits in reverse order
         num = (UINTN)value;
-        while (num > 0 && i < sizeof(temp)/sizeof(temp[0]) - 1) {
+        while (num > 0 && i < MAX_NUM_STR_LEN - 1) {
             digit = num % base;
             temp[i++] = (digit < 10) ? (L'0' + digit) : (L'A' + digit - 10);
             num = num / base;
@@ -67,10 +111,11 @@ IntToStr(CHAR16 *buffer, INTN value, UINTN base, UINTN width, BOOLEAN zero_pad) 
 
 /**
  * Simplified Unicode string print function with basic format specifier support
+ * Local implementation to avoid conflict with gnu-efi's UnicodeSPrint
  */
 UINTN
 EFIAPI
-UnicodeSPrint(
+LocalUnicodeSPrint(
     OUT CHAR16        *StartOfBuffer,
     IN  UINTN         BufferSize,
     IN  CONST CHAR16  *FormatString,
@@ -109,8 +154,8 @@ UnicodeSPrint(
             p++;
         }
         
-        // Parse width
-        while (*p >= L'0' && *p <= L'9') {
+        // Parse width (limit to reasonable size to prevent overflow)
+        while (*p >= L'0' && *p <= L'9' && width < 1000) {
             width = width * 10 + (*p - L'0');
             p++;
         }
@@ -120,10 +165,12 @@ UnicodeSPrint(
             case L's': {
                 // String
                 CHAR16 *str = va_arg(args, CHAR16*);
-                while (*str && remaining > 0) {
-                    *out++ = *str++;
-                    length++;
-                    remaining--;
+                if (str) {  // Add null check for safety
+                    while (*str && remaining > 0) {
+                        *out++ = *str++;
+                        length++;
+                        remaining--;
+                    }
                 }
                 p++;
                 break;
@@ -145,7 +192,7 @@ UnicodeSPrint(
             case L'u': {
                 // Unsigned decimal
                 UINTN value = va_arg(args, UINTN);
-                CHAR16 num_buf[32];
+                CHAR16 num_buf[64];  // Increased buffer size for safety
                 UINTN num_len = IntToStr(num_buf, (INTN)value, 10, width, zero_pad);
                 for (UINTN i = 0; i < num_len && remaining > 0; i++) {
                     *out++ = num_buf[i];
@@ -159,7 +206,7 @@ UnicodeSPrint(
             case L'X': {
                 // Hexadecimal
                 UINTN value = va_arg(args, UINTN);
-                CHAR16 num_buf[32];
+                CHAR16 num_buf[64];  // Increased buffer size for safety
                 UINTN num_len = IntToStr(num_buf, (INTN)value, 16, width, zero_pad);
                 for (UINTN i = 0; i < num_len && remaining > 0; i++) {
                     *out++ = num_buf[i];
@@ -171,7 +218,9 @@ UnicodeSPrint(
             }
             case L'r': {
                 // EFI status code
-                EFI_STATUS status = va_arg(args, EFI_STATUS);
+                // Use UINTN for va_arg to avoid potential alignment issues
+                UINTN status_val = va_arg(args, UINTN);
+                EFI_STATUS status = (EFI_STATUS)status_val;
                 CHAR16 status_buf[64];
                 UINTN status_len = 0;
                 
@@ -186,21 +235,21 @@ UnicodeSPrint(
                 }
                 
                 // Add a space and status code description if possible
-                const CHAR16* status_str = L" (Unknown)";
+                const CHAR16* status_str = (const CHAR16*)L" (Unknown)";
                 switch (status) {
-                    case EFI_SUCCESS: status_str = L" (Success)"; break;
-                    case EFI_LOAD_ERROR: status_str = L" (Load Error)"; break;
-                    case EFI_INVALID_PARAMETER: status_str = L" (Invalid Parameter)"; break;
-                    case EFI_UNSUPPORTED: status_str = L" (Unsupported)"; break;
-                    case EFI_BAD_BUFFER_SIZE: status_str = L" (Bad Buffer Size)"; break;
-                    case EFI_BUFFER_TOO_SMALL: status_str = L" (Buffer Too Small)"; break;
-                    case EFI_NOT_READY: status_str = L" (Not Ready)"; break;
-                    case EFI_DEVICE_ERROR: status_str = L" (Device Error)"; break;
-                    case EFI_WRITE_PROTECTED: status_str = L" (Write Protected)"; break;
-                    case EFI_OUT_OF_RESOURCES: status_str = L" (Out of Resources)"; break;
-                    case EFI_NOT_FOUND: status_str = L" (Not Found)"; break;
-                    case EFI_ABORTED: status_str = L" (Aborted)"; break;
-                    case EFI_SECURITY_VIOLATION: status_str = L" (Security Violation)"; break;
+                    case EFI_SUCCESS: status_str = (const CHAR16*)L" (Success)"; break;
+                    case EFI_LOAD_ERROR: status_str = (const CHAR16*)L" (Load Error)"; break;
+                    case EFI_INVALID_PARAMETER: status_str = (const CHAR16*)L" (Invalid Parameter)"; break;
+                    case EFI_UNSUPPORTED: status_str = (const CHAR16*)L" (Unsupported)"; break;
+                    case EFI_BAD_BUFFER_SIZE: status_str = (const CHAR16*)L" (Bad Buffer Size)"; break;
+                    case EFI_BUFFER_TOO_SMALL: status_str = (const CHAR16*)L" (Buffer Too Small)"; break;
+                    case EFI_NOT_READY: status_str = (const CHAR16*)L" (Not Ready)"; break;
+                    case EFI_DEVICE_ERROR: status_str = (const CHAR16*)L" (Device Error)"; break;
+                    case EFI_WRITE_PROTECTED: status_str = (const CHAR16*)L" (Write Protected)"; break;
+                    case EFI_OUT_OF_RESOURCES: status_str = (const CHAR16*)L" (Out of Resources)"; break;
+                    case EFI_NOT_FOUND: status_str = (const CHAR16*)L" (Not Found)"; break;
+                    case EFI_ABORTED: status_str = (const CHAR16*)L" (Aborted)"; break;
+                    case EFI_SECURITY_VIOLATION: status_str = (const CHAR16*)L" (Security Violation)"; break;
                 }
                 
                 // Append status string
