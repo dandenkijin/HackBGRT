@@ -9,25 +9,59 @@
 #ifndef _HACKBGRT_UTIL_H_
 #define _HACKBGRT_UTIL_H_
 
+// Utility macros
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
 // Include EFI types first to ensure all required types are defined
 #include "efi.h"
 
-// Forward declarations for EFI structures
-struct _EFI_SYSTEM_TABLE;
-struct _EFI_BOOT_SERVICES;
-struct _EFI_RUNTIME_SERVICES;
+// Common string constants as pointers to wide string literals
+#define STR_YES         EFI_STR("yes")
+#define STR_NO          EFI_STR("no")
+#define STR_ON          EFI_STR("on")
+#define STR_OFF         EFI_STR("off")
+#define STR_TRUE        EFI_STR("true")
+#define STR_FALSE       EFI_STR("false")
+#define STR_1           EFI_STR("1")
+#define STR_0           EFI_STR("0")
+#define STR_EMPTY       EFI_STR("")
 
-// Log buffer for storing log messages
-extern CHAR16 log_buffer[65536];
-#define LOG_BUFFER_SIZE 65536
+// Helper macros for string comparison
+#define STR_EQUAL(s1, s2)   (StrCmp((s1), (s2)) == 0)
+#define STR_NCMP(s1, s2, n) (StrnCmp((s1), (s2), (n)) == 0)
 
-// Local implementation of UnicodeSPrint to avoid conflict with gnu-efi
-UINTN EFIAPI LocalUnicodeSPrint(
-    CHAR16 *StartOfBuffer,
-    UINTN BufferSize,
-    const CHAR16 *FormatString,
-    ...
-    );
+// UTF-8 encoding constants
+#define MAX_UTF8_SEQUENCE_LEN   4
+#define UNICODE_REPLACEMENT_CHAR 0xFFFD
+#define UTF8_2BYTE_MASK         0xE0
+#define UTF8_3BYTE_MASK         0xF0
+#define UTF8_4BYTE_MASK         0xF8
+#define UTF8_CONTINUATION_MASK  0xC0
+#define UTF8_CONTINUATION_BITS  0x80
+#define UTF8_2BYTE_BITS         0xC0
+#define UTF8_3BYTE_BITS         0xE0
+#define UTF8_4BYTE_BITS         0xF0
+
+/**
+ * Convert a UTF-8 encoded string to UCS-2 (UTF-16) encoding.
+ *
+ * @param[in]  utf8       Input UTF-8 string
+ * @param[out] ucs2       Output buffer for UCS-2 string
+ * @param[in]  ucs2_len   Size of output buffer in CHAR16 elements
+ * @return Number of CHAR16 characters written (excluding null terminator)
+ */
+UINTN UTF8ToUCS2(CHAR8 *utf8, CHAR16 *ucs2, UINTN ucs2_len);
+
+/**
+ * Convert an ASCII string to a dynamically allocated CHAR16 string.
+ *
+ * @param[in] str  Input ASCII string (null-terminated)
+ * @return Pointer to the allocated CHAR16 string, or NULL on failure
+ * 
+ * @note The caller is responsible for freeing the returned buffer with gBS->FreePool.
+ */
+CHAR16* AsciiToChar16(const char* str);
 
 /**
  * Convert a short ASCII string to UCS2, store in a static array.
@@ -39,30 +73,16 @@ UINTN EFIAPI LocalUnicodeSPrint(
 extern const CHAR16* TmpStr(CHAR8 *src, int length);
 
 /**
- * Print or log a string.
+ * Safely convert a wide string to a 32-bit integer with overflow checking.
  *
- * @param mode -1 = print without logging, 0 = log only, 1 = both.
- * @param fmt The format string. Supports %d, %x, %s, %p, etc.
- * @param ... Variable arguments for the format string
- */
-extern void Log(int mode, IN CONST CHAR16 *fmt, ...);
-
-/**
- * Output a message to the console and log buffer
+ * @param[in]  str     The wide string to convert (must be null-terminated)
+ * @param[out] result  Pointer to store the converted integer
+ * @return BOOLEAN     TRUE if conversion was successful, FALSE on overflow or invalid input
  * 
- * @param Message The message to output (must be null-terminated)
+ * @note This function handles optional leading whitespace, an optional sign (+ or -),
+ *       and skips any non-digit characters after the number.
  */
-extern void LogMessage(IN CONST CHAR16 *Message);
-
-/**
- * Dump the log buffer to the screen.
- */
-extern void DumpLog(void);
-
-/**
- * Clear the log EFI variable, for minor RAM savings.
- */
-extern void ClearLogVariable(void);
+BOOLEAN SafeAtoi(const CHAR16* str, INT32* result);
 
 /**
  * @brief Return the greater of two integers
@@ -231,5 +251,31 @@ INTN EFIAPI StrCmp(IN CONST CHAR16* s1, IN CONST CHAR16* s2);
  * @return INTN Zero if the strings are equal, negative if s1 < s2, positive if s1 > s2
  */
 INTN EFIAPI StrnCmp(IN CONST CHAR16* s1, IN CONST CHAR16* s2, IN UINTN len);
+
+/**
+ * Calculate the length of a null-terminated wide character string.
+ *
+ * @param s The string to measure
+ * @return UINTN The length of the string, not including the null terminator
+ */
+UINTN StrLen(CONST CHAR16 *s);
+
+/**
+ * Copy memory from source to destination.
+ *
+ * @param dest Destination buffer
+ * @param src Source buffer
+ * @param len Number of bytes to copy
+ */
+VOID CopyMem(VOID *dest, CONST VOID *src, UINTN len);
+
+/**
+ * Duplicate a wide character string.
+ *
+ * @param src The string to duplicate
+ * @return CHAR16* A newly allocated copy of the string, or NULL on failure
+ * @note The caller is responsible for freeing the returned string with BS->FreePool
+ */
+CHAR16* StrDup(CONST CHAR16* src);
 
 #endif /* _HACKBGRT_UTIL_H_ */

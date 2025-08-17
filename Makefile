@@ -65,7 +65,7 @@ $(GNUEFI_OBJ)/lib/libefi-custom.a: $(GNUEFI_OBJS)
 	touch $@
 	ar rcs $@ $^
 
-FILES_C = src/main.c src/util.c src/types.c src/config.c src/sbat.c src/efi.c
+FILES_C = src/main.c src/util.c src/types.c src/config.c src/sbat.c src/efi.c src/graphics.c src/image.c
 FILES_H = $(wildcard src/*.h)
 FILES_CS = src/Setup.cs src/Esp.cs src/Efi.cs src/EfiBootEntries.cs
 

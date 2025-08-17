@@ -1,0 +1,604 @@
+/**
+ * @file config.c
+ * @brief Configuration file parsing and management for HackBGRT
+ * 
+ * This module handles reading and parsing the HackBGRT configuration files,
+ * which control how the boot splash screen is modified. It supports features
+ * like custom boot images, resolution settings, and various display options.
+ * 
+ * The configuration file is a simple text file with key-value pairs and
+ * supports includes, comments, and various directives for customizing the
+ * boot experience.
+ */
+
+#ifndef _CONFIG_C_
+#define _CONFIG_C_
+
+// Include platform-specific defines first
+#include "platform.h"
+
+// Include EFI headers before our types to prevent redefinitions
+#include "efi.h"        // Main EFI type definitions
+
+// Include project headers
+#include <stdbool.h>
+#include <stddef.h>
+#include "config.h"     // Configuration structures and constants
+#include "log.h"        // Logging functions
+#include "util.h"       // Utility functions including UTF8ToUCS2
+#include "base_types.h"
+#include "efi.h"
+
+// Helper macros for string literals
+#define LSTR(str) ((const CHAR16 *)L##str)
+
+// Define EFI function pointers if not already defined
+#ifndef gBS
+#define gBS (BS)
+#endif
+
+#ifndef gST
+#define gST (ST)
+#endif
+
+// Helper macro to create a wide string literal
+#define WIDE_STRING(str) L##str
+
+// Version string definition
+static const CHAR16 versionString[] = {
+#ifdef GIT_DESCRIBE_W
+    GIT_DESCRIBE_W
+#else
+    L'1', L'.', L'0', L'.', L'0', L'-', L'u', L'n', L'k', L'n', L'o', L'w', L'n', L'\0'
+#endif
+};
+
+/**
+ * @brief Get the version string for the application
+ * 
+ * @return const CHAR16* Pointer to the version string
+ */
+const CHAR16* GetVersionString(void)
+{
+    return versionString;
+}
+
+// Define version macro for backward compatibility
+#define version versionString
+
+// Internal function implementations
+
+// Define the EFI File Info GUID if not already defined
+#ifndef EFI_FILE_INFO_GUID
+#define EFI_FILE_INFO_GUID \
+    { 0x09576e92, 0x6d3f, 0x11d2, {0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b} }
+#endif
+
+// Helper macro to safely free memory
+#ifndef SAFE_FREE_POOL
+#define SAFE_FREE_POOL(Ptr) do { if (Ptr) { PLAT_FREE_POOL(Ptr); (Ptr) = NULL; } } while(0)
+#endif
+
+/**
+ * Read and parse a configuration file.
+ * 
+ * @param[in,out] config    Configuration structure to populate
+ * @param[in]     base_dir  Base directory for relative paths
+ * @param[in]     path      Path to the configuration file
+ * @return TRUE if the file was successfully read and parsed, FALSE otherwise
+ */
+BOOLEAN EFIAPI ReadConfigFile(HackBGRT_config* config, EFI_FILE_PROTOCOL* base_dir, const CHAR16* path) {
+    if (!config || !base_dir || !path) {
+        Log(1, MSG_ERR_INVALID_PARAMS, EFI_STR("ReadConfigFile"));
+        return FALSE;
+    }
+    
+    if (StrLen(path) >= MAX_PATH_LENGTH) {
+        Log(1, MSG_ERR_PATH_TOO_LONG, MAX_PATH_LENGTH - 1);
+        return FALSE;
+    }
+    
+    EFI_STATUS e;
+    EFI_FILE_PROTOCOL* file = NULL;
+    EFI_FILE_INFO* file_info = NULL;
+    UINTN file_info_size = 0;
+    UINTN file_size = 0;
+    CHAR8* file_data = NULL;
+    CHAR16* ucs2_data = NULL;
+    UINTN ucs2_len = 0;
+    UINTN i, line_start = 0;
+    
+    // Create a non-const copy of the path for Open()
+    UINTN path_len = StrLen(path) + 1;
+    CHAR16 *path_copy = NULL;
+    EFI_STATUS status = gBS->AllocatePool(EfiLoaderData, path_len * sizeof(CHAR16), (void **)&path_copy);
+    if (EFI_ERROR(status) || !path_copy) {
+        Log(1, EFI_STR("Error: Failed to allocate memory for path copy\r\n"));
+        return FALSE;
+    }
+    gBS->CopyMem(path_copy, (VOID *)path, path_len * sizeof(CHAR16));
+    
+    // Open the configuration file
+    e = base_dir->Open(base_dir, &file, path_copy, EFI_FILE_MODE_READ, 0);
+    gBS->FreePool(path_copy);
+    
+    if (EFI_ERROR(e)) {
+        Log(1, MSG_ERR_OPEN_CONFIG, path, e);
+        return FALSE;
+    }
+    
+    // Allocate memory for file info
+    file_info_size = sizeof(EFI_FILE_INFO) + 256; // Extra space for filename
+    e = gBS->AllocatePool(EfiLoaderData, file_info_size, (VOID**)&file_info);
+    if (EFI_ERROR(e) || !file_info) {
+        Log(1, MSG_ERR_ALLOC_FILE_INFO, file_info_size);
+        file->Close(file);
+        return FALSE;
+    }
+    
+    // Get file information
+    e = file->GetInfo(file, &gEfiFileInfoGuid, &file_info_size, file_info);
+    if (EFI_ERROR(e)) {
+        Log(1, MSG_ERR_GET_FILE_INFO, e);
+        file->Close(file);
+        FreePool(file_info);
+        return FALSE;
+    }
+    
+    // Get file size and validate it's not too large
+    file_size = file_info->FileSize;
+    if (file_size > 1024 * 1024) { // 1MB max
+        Log(1, MSG_ERR_FILE_TOO_LARGE, file_size);
+        file->Close(file);
+        FreePool(file_info);
+        return FALSE;
+    }
+    
+    // Allocate memory for file data
+    e = gBS->AllocatePool(EfiLoaderData, file_size, (VOID**)&file_data);
+    if (EFI_ERROR(e) || !file_data) {
+        Log(1, MSG_ERR_ALLOC_FILE_DATA, file_size);
+        file->Close(file);
+        FreePool(file_info);
+        return FALSE;
+    }
+    
+    UINTN read_size = file_size;
+    e = file->Read(file, &read_size, file_data);
+    file->Close(file);
+    file = NULL;
+    
+    if (EFI_ERROR(e) || read_size != file_size) {
+        Log(1, MSG_ERR_READ_FILE, read_size, file_size, e);
+        FreePool(file_data);
+        FreePool(file_info);
+        return FALSE;
+    }
+    
+    // Allocate memory for UCS-2 data (2 bytes per character + null terminator)
+    ucs2_len = file_size * 2 + 2;
+    e = gBS->AllocatePool(EfiLoaderData, ucs2_len * sizeof(CHAR16), (VOID**)&ucs2_data);
+    if (EFI_ERROR(e) || !ucs2_data) {
+        Log(1, MSG_ERR_ALLOC_UCS2, ucs2_len * sizeof(CHAR16));
+        FreePool(file_data);
+        FreePool(file_info);
+        return FALSE;
+    }
+    
+    UINTN chars_written = UTF8ToUCS2(file_data, ucs2_data, ucs2_len);
+    if (chars_written == 0) {
+        Log(1, MSG_ERR_CONVERT_UCS2);
+        FreePool(ucs2_data);
+        FreePool(file_data);
+        FreePool(file_info);
+        return FALSE;
+    }
+    
+    for (i = 0; i < chars_written;) {
+        line_start = i;
+        while (i < chars_written && ucs2_data[i] != '\r' && ucs2_data[i] != '\n') {
+            ++i;
+        }
+        while (i < chars_written && (ucs2_data[i] == '\r' || ucs2_data[i] == '\n')) {
+            ucs2_data[i] = 0;
+            ++i;
+        }
+        ReadConfigLine(config, base_dir, &ucs2_data[line_start]);
+    }
+    
+    // Clean up
+    FreePool(ucs2_data);
+    FreePool(file_data);
+    FreePool(file_info);
+    
+    return TRUE;
+}
+
+/**
+ * Set the BMP image with random weight-based selection.
+ * 
+ * @param config The configuration to update
+ * @param weight The weight for random selection
+ * @param action The action to perform
+ * @param x X coordinate
+ * @param y Y coordinate
+ * @param o Orientation
+ * @param path Path to the image file
+ */
+static void SetBMPWithRandom(HackBGRT_config* config, int weight, HackBGRT_action action, 
+                           int x, int y, int o, const CHAR16* path) {
+    if (!config) {
+        return;
+    }
+    
+    int new_weight_sum;
+    if (__builtin_add_overflow(config->image_weight_sum, weight, &new_weight_sum)) {
+        Log(1, MSG_WARN_WEIGHT_OVERFLOW);
+        config->image_weight_sum = weight;
+    } else {
+        config->image_weight_sum = new_weight_sum;
+    }
+    
+    UINT64 random = (UINT64)Random() * (UINT64)config->image_weight_sum;
+    UINT64 limit = (UINT64)0xFFFFFFFF * (UINT64)weight;
+    
+    if (config->debug) {
+        // Convert action enum to string for logging
+        const CHAR16* action_str;
+        switch (action) {
+            case HackBGRT_REPLACE: action_str = EFI_STR("replace"); break;
+            case HackBGRT_REMOVE:  action_str = EFI_STR("remove");  break;
+            case HackBGRT_KEEP:    action_str = EFI_STR("keep");    break;
+            default:               action_str = EFI_STR("unknown");
+        }
+        
+        // Store the format string in a variable to ensure proper type
+        const CHAR16* format_str = random <= limit ? MSG_USING_IMAGE : MSG_SKIPPING_IMAGE;
+        Log(1, 
+            format_str,
+            (INTN)weight, 
+            action_str,  // Now properly typed as const CHAR16*
+            (INTN)x, 
+            (INTN)y, 
+            (INTN)o, 
+            path ? path : EFI_STR("(null)"), 
+            random, 
+            limit
+        );
+    }
+    
+    if (random <= limit) {
+        if (config->image_path_allocated) {
+            FreePool((VOID*)config->image_path);
+            config->image_path_allocated = FALSE;
+        }
+        
+        if (path && *path) {
+            UINTN path_len = StrLen(path) + 1;
+            CHAR16* path_copy = NULL;
+            EFI_STATUS status = gBS->AllocatePool(EfiLoaderData, path_len * sizeof(CHAR16), (VOID**)&path_copy);
+            if (EFI_ERROR(status) || !path_copy) {
+                Log(1, MSG_ERR_ALLOC_MEMORY, path_len * sizeof(CHAR16));
+                return;
+            }
+            gBS->CopyMem(path_copy, (VOID *)path, path_len * sizeof(CHAR16));
+            config->image_path = path_copy;
+            config->image_path_allocated = TRUE;
+        } else {
+            Log(1, MSG_ERR_PATH_COPY);
+            config->image_path = NULL;
+            config->image_path_allocated = FALSE;
+            }
+        } else {
+            config->image_path = NULL;
+            config->image_path_allocated = FALSE;
+        }
+        
+        config->action = action;
+        config->orientation = o;
+        config->image_x = x;
+        config->image_y = y;
+    }
+
+/**
+ * Parse a coordinate string into an integer value.
+ * 
+ * @param str The string to parse (can be a number or "keep")
+ * @param action The current action to determine fallback behavior
+ * @return INT32 The parsed coordinate, HackBGRT_coord_keep if "keep" is specified,
+ *         or DEFAULT_COORDINATE if the input is invalid
+ */
+static INT32 ParseCoordinate(const CHAR16* str, HackBGRT_action action) {
+    // Validate input parameters
+    if (str == NULL || *str == L'\0') {
+        if (action == HackBGRT_KEEP) {
+            return HackBGRT_coord_keep;
+        }
+        return DEFAULT_COORDINATE;
+    }
+
+    // Check for "keep" keyword or if action is KEEP
+    if (action == HackBGRT_KEEP || StrnCmp(str, STR_EMPTY, 4) == 0) {
+        return HackBGRT_coord_keep;
+    }
+
+    // Check for negative number or positive number
+    if ((str[0] >= L'0' && str[0] <= L'9') || str[0] == L'-') {
+        // Skip leading whitespace
+        const CHAR16* num_str = str;
+        while (*num_str == L' ' || *num_str == L'\t') {
+            num_str++;
+        }
+        
+        // Check for valid number format
+        const CHAR16* p = num_str;
+        if (*p == L'-') {
+            p++;
+        }
+        
+        BOOLEAN has_digits = FALSE;
+        while (*p) {
+            if (*p < L'0' || *p > L'9') {
+                // Invalid character in number
+                if (action == HackBGRT_KEEP) {
+                    return HackBGRT_coord_keep;
+                }
+                return DEFAULT_COORDINATE;
+            }
+            has_digits = TRUE;
+            p++;
+        }
+        
+        if (!has_digits) {
+            // No digits found
+            if (action == HackBGRT_KEEP) {
+                return HackBGRT_coord_keep;
+            }
+            return DEFAULT_COORDINATE;
+        }
+        
+        // Convert the string to an integer with overflow checking
+        int value;
+        if (!SafeAtoi(num_str, &value)) {
+            // Conversion failed due to overflow or invalid input
+            if (action == HackBGRT_KEEP) {
+                return HackBGRT_coord_keep;
+            }
+            return DEFAULT_COORDINATE;
+        }
+        
+        return value;
+    }
+    
+    // Default fallback
+    if (action == HackBGRT_KEEP) {
+        return HackBGRT_coord_keep;
+    }
+    return DEFAULT_COORDINATE;
+}
+
+
+/**
+ * Read and process an image configuration line.
+ * 
+ * @param config The configuration to update
+ * @param line The configuration line to parse (format: [n=WEIGHT] [x=X] [y=Y] [o=ORIENTATION] [path=PATH] [remove|black|keep])
+ */
+static void ReadConfigImage(HackBGRT_config* config, const CHAR16* line) {
+    // Validate parameters
+    if (!config || !line) {
+        Log(1, MSG_ERR_INVALID_IMAGE_PARAMS);
+        return;
+    }
+
+    // Find parameter positions
+    const CHAR16* n = NULL;
+    const CHAR16* x = NULL;
+    const CHAR16* y = NULL;
+    const CHAR16* o = NULL;
+    const CHAR16* f = NULL;
+    
+    // Manually parse parameters to avoid multiple string scans
+    const CHAR16* current = line;
+    while (*current) {
+        // Skip whitespace
+        while (*current == L' ' || *current == L'\t') {
+            current++;
+        }
+        if (!*current) break;
+        
+        // Check for parameter
+        if (StrnCmp(current, EFI_STR("n="), 2) == 0) {
+            n = current + 2;
+        } else if (StrnCmp(current, EFI_STR("x="), 2) == 0) {
+            x = current + 2;
+        } else if (StrnCmp(current, EFI_STR("y="), 2) == 0) {
+            y = current + 2;
+        } else if (StrnCmp(current, EFI_STR("o="), 2) == 0) {
+            o = current + 2;
+        } else if (StrnCmp(current, EFI_STR("path="), 5) == 0) {
+            f = current + 5;
+        }
+        
+        // Move to next parameter
+        while (*current && *current != L' ' && *current != L'\t') {
+            current++;
+        }
+    }
+    
+    // Determine action based on parameters
+    // Check for action keywords (must be last in the line)
+    HackBGRT_action action = HackBGRT_REPLACE; // Default action
+    // Define action strings using the pre-defined string constants from config.h
+    if (StrStr(line, STR_REMOVE) != NULL) {
+        action = HackBGRT_REMOVE;
+    } else if (StrStr(line, STR_EMPTY) != NULL) {  // Using STR_EMPTY for "keep"
+        action = HackBGRT_KEEP;
+    } else {
+        Log(1, MSG_ERR_INVALID_IMAGE_LINE, line);
+        return;
+    }
+
+    // Parse weight if specified
+    int weight = 1;
+    if (n) {
+        // Find the end of the weight value
+        const CHAR16* weight_end = n;
+        while (*weight_end && *weight_end != L' ' && *weight_end != L'\t') {
+            weight_end++;
+        }
+        
+        // Create a temporary buffer for the weight string
+        UINTN weight_len = weight_end - n;
+        if (weight_len > 0) {
+            INT32 weight_val;
+            if (SafeAtoi(n, &weight_val) && weight_val > 0) {
+                weight = weight_val;
+            } else {
+                Log(1, MSG_ERR_INVALID_WEIGHT, weight_val);
+            }
+        }
+    }
+
+    int x_val = ParseCoordinate(x, action);
+    int y_val = ParseCoordinate(y, action);
+    int o_val = o ? ParseCoordinate(o, action) : HackBGRT_coord_keep;
+    
+    // Set the BMP with the parsed values
+    SetBMPWithRandom(config, weight, action, x_val, y_val, o_val, f);
+}
+
+/**
+ * Read and process a resolution configuration line.
+ * 
+ * @param config The configuration to update
+ * @param line The resolution line to parse (format: WIDTHxHEIGHT)
+ */
+static void ReadConfigResolution(HackBGRT_config* config, const CHAR16* line) {
+    // Validate parameters
+    if (!config || !line) {
+        Log(1, MSG_ERR_INVALID_PARAMS_RESOLUTION);
+        return;
+    }
+
+    // Find the 'x' separator
+    const CHAR16* x_pos = line;
+    const CHAR16* y_pos = NULL;
+    UINTN line_len = StrLen(line);
+    
+    // Manually find 'x' separator to avoid potential issues with StrStrAfter
+    for (UINTN i = 0; i < line_len; i++) {
+        if (line[i] == L'x' || line[i] == L'X') {
+            y_pos = line + i + 1;
+            break;
+        }
+    }
+    
+    // Validate format
+    if (!y_pos || *y_pos == 0 || x_pos == y_pos - 1) {
+        Log(1, MSG_ERR_INVALID_RESOLUTION_FORMAT, line);
+        return;
+    }
+
+    // Parse resolution values with proper error checking
+    INT32 x_val, y_val;
+    BOOLEAN x_negative = (*x_pos == L'-');
+    BOOLEAN y_negative = (*y_pos == L'-');
+    
+    // Skip the '-' sign for parsing if present
+    const CHAR16* x_start = x_negative ? x_pos + 1 : x_pos;
+    const CHAR16* y_start = y_negative ? y_pos + 1 : y_pos;
+    
+    // Parse the values
+    if (!SafeAtoi(x_start, &x_val) || !SafeAtoi(y_start, &y_val)) {
+        Log(1, MSG_ERR_INVALID_RESOLUTION_FORMAT, line);
+        return;
+    }
+    
+    // Apply the sign
+    x_val = x_negative ? -x_val : x_val;
+    y_val = y_negative ? -y_val : y_val;
+    
+    // Store the values
+    config->resolution_x = x_val;
+    config->resolution_y = y_val;
+    
+    // Validate the resolution values
+    if (config->resolution_x == 0 || config->resolution_y == 0) {
+        Log(1, MSG_ERR_INVALID_RESOLUTION, config->resolution_x, config->resolution_y);
+        config->resolution_x = 0;
+        config->resolution_y = 0;
+    } else {
+        Log(1, MSG_INFO_RESOLUTION_SET, config->resolution_x, config->resolution_y);
+    }
+}
+
+/**
+ * Parse a single configuration line and update the configuration accordingly.
+ * 
+ * @param config The configuration structure to update
+ * @param base_dir The base directory for resolving relative paths
+ * @param line The configuration line to parse
+ */
+void EFIAPI ReadConfigLine(HackBGRT_config* config, EFI_FILE_PROTOCOL* base_dir, const CHAR16* line) {
+    // Validate parameters
+    if (!config || !line) {
+        Log(1, EFI_STR("Error: Invalid parameters to ReadConfigLine\r\n"));
+        return;
+    }
+    
+    line = TrimLeft(line);
+    if (line[0] == L'#' || line[0] == 0) {
+        return;
+    }
+
+    if (StrnCmp(line, EFI_STR("debug="), 6) == 0) {
+        config->debug = (StrCmp(line + 6, EFI_STR("1")) == 0);
+        Log(1, MSG_DEBUG_MODE, config->debug ? EFI_STR("enabled") : EFI_STR("disabled"));
+        return;
+    }
+    
+    if (StrnCmp(line, EFI_STR("log="), 4) == 0) {
+        config->log = (StrCmp(line + 4, EFI_STR("1")) == 0);
+        Log(1, MSG_LOGGING_STATUS, config->log ? EFI_STR("enabled") : EFI_STR("disabled"));
+        return;
+    }
+    
+    // Parse image configuration
+    if (StrnCmp(line, STR_IMAGE, StrLen(STR_IMAGE)) == 0 && line[StrLen(STR_IMAGE)] == L'=') {
+        const CHAR16* image_config = line + StrLen(STR_IMAGE) + 1;
+        Log(1, MSG_PROCESSING_IMAGE, image_config);
+        ReadConfigImage(config, image_config);
+        return;
+    }
+    
+    // Parse boot path
+    if (StrnCmp(line, STR_BOOT, StrLen(STR_BOOT)) == 0 && line[StrLen(STR_BOOT)] == L'=') {
+        config->boot_path = (CHAR16*)(line + StrLen(STR_BOOT) + 1);
+        Log(1, MSG_BOOT_PATH_SET, config->boot_path);
+        return;
+    }
+    
+    // Parse included config file
+    if (StrnCmp(line, STR_CONFIG, StrLen(STR_CONFIG)) == 0 && line[StrLen(STR_CONFIG)] == L'=') {
+        const CHAR16* config_path = line + StrLen(STR_CONFIG) + 1;
+        Log(1, MSG_LOADING_CONFIG, config_path);
+        if (!ReadConfigFile(config, base_dir, config_path)) {
+            Log(1, MSG_LOAD_CONFIG_FAILED, config_path);
+        }
+        return;
+    }
+    
+    // Parse resolution setting
+    if (StrnCmp(line, STR_RESOLUTION, StrLen(STR_RESOLUTION)) == 0 && line[StrLen(STR_RESOLUTION)] == L'=') {
+        const CHAR16* resolution_str = line + StrLen(STR_RESOLUTION) + 1;
+        Log(1, MSG_SETTING_RESOLUTION, resolution_str);
+        ReadConfigResolution(config, resolution_str);
+        return;
+    }
+    
+    // Unknown directive
+    Log(1, MSG_UNKNOWN_DIRECTIVE, line);
+}
+
+#endif // _CONFIG_C_

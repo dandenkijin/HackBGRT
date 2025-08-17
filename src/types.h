@@ -9,13 +9,21 @@
 
 #ifndef _HACKBGRT_TYPES_H_
 #define _HACKBGRT_TYPES_H_
+#endif
 
+// Include standard headers
 #include <stdint.h>
-#include <stdbool.h>
 #include <stddef.h>
+#include <stdbool.h>
 
-// Include EFI definitions for table headers and other types
-#include "efi.h"
+// Include base type definitions first
+#include "base_types.h"
+
+// Include EFI type definitions
+#include "efi_types.h"
+
+// Include platform-specific definitions
+#include "platform.h"
 
 // Basic type definitions
 #ifndef VOID
@@ -36,25 +44,15 @@ typedef void *VOID_PTR;
 #define CONST const
 #endif
 
-// Basic EFI types
-typedef uint64_t UINT64;
-typedef int64_t INT64;
-typedef uint32_t UINT32;
-typedef int32_t INT32;
-typedef uint16_t UINT16;
-typedef int16_t INT16;
-typedef uint8_t UINT8;
-typedef int8_t INT8;
-#ifndef BOOLEAN
-typedef uint8_t BOOLEAN;
-#endif
-typedef uintptr_t UINTN;  // Changed to uintptr_t for better portability
-typedef intptr_t INTN;    // Changed to intptr_t for better portability
+// Platform-independent type definitions
+#ifndef _HACKBGRT_BASE_TYPES_DEFINED_
+#define _HACKBGRT_BASE_TYPES_DEFINED_
 
-// VOID is defined in efi_wrapper.h to ensure consistency
-// We don't define it here to avoid conflicts
-typedef uint16_t CHAR16;
-typedef char CHAR8;
+// Standard integer types
+typedef intptr_t INTN;    // Native integer type for the platform
+
+typedef uint16_t CHAR16;  // UTF-16 character
+typedef char CHAR8;       // ASCII/UTF-8 character
 
 // Boolean values
 #ifndef TRUE
@@ -65,13 +63,52 @@ typedef char CHAR8;
 #define FALSE 0
 #endif
 
-// EFI specific types
-typedef UINTN EFI_STATUS;
-typedef VOID *EFI_HANDLE;
-typedef VOID *EFI_EVENT;
-typedef UINTN EFI_TPL;  // Task Priority Level
-typedef UINT64 EFI_PHYSICAL_ADDRESS;
-typedef UINT64 EFI_VIRTUAL_ADDRESS;
+// EFI error code macros
+#ifndef EFIERR
+#define EFIERR(a) (0x80000000 | (a))
+#endif
+
+// Common EFI status codes (only define if not already defined in efi_types.h)
+#ifndef EFI_SUCCESS
+#define EFI_SUCCESS 0
+#endif
+
+#ifndef EFI_LOAD_ERROR
+#define EFI_LOAD_ERROR EFIERR(1)
+#endif
+
+#ifndef EFI_INVALID_PARAMETER
+#define EFI_INVALID_PARAMETER EFIERR(2)
+#endif
+
+#ifndef EFI_UNSUPPORTED
+#define EFI_UNSUPPORTED EFIERR(3)
+#endif
+
+#ifndef EFI_BAD_BUFFER_SIZE
+#define EFI_BAD_BUFFER_SIZE EFIERR(4)
+#endif
+
+#ifndef EFI_BUFFER_TOO_SMALL
+#define EFI_BUFFER_TOO_SMALL EFIERR(5)
+#endif
+
+#ifndef EFI_NOT_READY
+#define EFI_NOT_READY EFIERR(6)
+#endif
+
+#ifndef EFI_DEVICE_ERROR
+#define EFI_DEVICE_ERROR EFIERR(7)
+#endif
+
+#ifndef EFI_WRITE_PROTECTED
+#define EFI_WRITE_PROTECTED EFIERR(8)
+#endif
+
+#ifndef EFI_OUT_OF_RESOURCES
+#define EFI_OUT_OF_RESOURCES EFIERR(9)
+#endif
+
 
 // Standard integer types
 #ifndef _STDINT_H
@@ -290,8 +327,52 @@ typedef enum {
 #ifndef _EFI_RUNTIME_SERVICES_DEFINED_
 #define _EFI_RUNTIME_SERVICES_DEFINED_
 
-// Forward declaration of EFI_TABLE_HEADER
-struct _EFI_TABLE_HEADER;
+// Include base types if not already included
+#include "base_types.h"
+
+// Forward declaration for runtime services
+struct _EFI_RUNTIME_SERVICES;
+
+// Function pointer types for runtime services
+typedef EFI_STATUS (EFIAPI *EFI_GET_TIME) (
+    OUT EFI_TIME *Time,
+    OUT EFI_TIME_CAPABILITIES *Capabilities OPTIONAL
+);
+
+typedef EFI_STATUS (EFIAPI *EFI_SET_TIME) (
+    IN EFI_TIME *Time
+);
+
+typedef EFI_STATUS (EFIAPI *EFI_GET_WAKEUP_TIME) (
+    OUT BOOLEAN *Enabled,
+    OUT BOOLEAN *Pending,
+    OUT EFI_TIME *Time
+);
+
+typedef EFI_STATUS (EFIAPI *EFI_SET_WAKEUP_TIME) (
+    IN BOOLEAN Enable,
+    IN EFI_TIME *Time OPTIONAL
+);
+
+typedef EFI_STATUS (EFIAPI *EFI_SET_VIRTUAL_ADDRESS_MAP) (
+    IN UINTN MemoryMapSize,
+    IN UINTN DescriptorSize,
+    IN UINT32 DescriptorVersion,
+    IN EFI_MEMORY_DESCRIPTOR *VirtualMap
+);
+
+typedef EFI_STATUS (EFIAPI *EFI_CONVERT_POINTER) (
+    IN UINTN DebugDisposition,
+    IN OUT VOID **Address
+);
+
+typedef EFI_STATUS (EFIAPI *EFI_GET_VARIABLE) (
+    IN CHAR16 *VariableName,
+    IN EFI_GUID *VendorGuid,
+    OUT UINT32 *Attributes OPTIONAL,
+    IN OUT UINTN *DataSize,
+    OUT VOID *Data OPTIONAL
+);
 
 /**
  * @struct _EFI_RUNTIME_SERVICES
@@ -300,50 +381,21 @@ struct _EFI_TABLE_HEADER;
  * This structure contains pointers to all of the runtime services.
  */
 typedef struct _EFI_RUNTIME_SERVICES {
-    struct _EFI_TABLE_HEADER Hdr;           ///< Standard header
+    /// Standard header with signature, revision, and size of the table
+    EFI_TABLE_HEADER Hdr;
     
     // Time Services
-    EFI_STATUS (EFIAPI *GetTime)(
-        OUT EFI_TIME            *Time,
-        OUT EFI_TIME_CAPABILITIES *Capabilities OPTIONAL
-    );
-    
-    EFI_STATUS (EFIAPI *SetTime)(
-        IN EFI_TIME            *Time
-    );
-    
-    EFI_STATUS (EFIAPI *GetWakeupTime)(
-        OUT BOOLEAN            *Enabled,
-        OUT BOOLEAN            *Pending,
-        OUT EFI_TIME           *Time
-    );
-    
-    EFI_STATUS (EFIAPI *SetWakeupTime)(
-        IN BOOLEAN             Enable,
-        IN EFI_TIME           *Time OPTIONAL
-    );
+    EFI_GET_TIME GetTime;
+    EFI_SET_TIME SetTime;
+    EFI_GET_WAKEUP_TIME GetWakeupTime;
+    EFI_SET_WAKEUP_TIME SetWakeupTime;
     
     // Virtual Memory Services
-    EFI_STATUS (EFIAPI *SetVirtualAddressMap)(
-        IN UINTN                MemoryMapSize,
-        IN UINTN                DescriptorSize,
-        IN UINT32               DescriptorVersion,
-        IN EFI_MEMORY_DESCRIPTOR *VirtualMap
-    );
-    
-    EFI_STATUS (EFIAPI *ConvertPointer)(
-        IN UINTN                DebugDisposition,
-        IN OUT VOID             **Address
-    );
+    EFI_SET_VIRTUAL_ADDRESS_MAP SetVirtualAddressMap;
+    EFI_CONVERT_POINTER ConvertPointer;
     
     // Variable Services
-    EFI_STATUS (EFIAPI *GetVariable)(
-        IN CHAR16               *VariableName,
-        IN EFI_GUID             *VendorGuid,
-        OUT UINT32              *Attributes OPTIONAL,
-        IN OUT UINTN            *DataSize,
-        OUT VOID                *Data
-    );
+    EFI_GET_VARIABLE GetVariable;
     
     EFI_STATUS (EFIAPI *GetNextVariableName)(
         IN OUT UINTN            *VariableNameSize,
@@ -364,19 +416,49 @@ typedef struct _EFI_RUNTIME_SERVICES {
         OUT UINT32              *HighCount
     );
     
-    VOID (EFIAPI *ResetSystem)(
+    EFI_STATUS (EFIAPI *ResetSystem)(
         IN EFI_RESET_TYPE       ResetType,
         IN EFI_STATUS           ResetStatus,
         IN UINTN                DataSize,
         IN VOID                 *ResetData OPTIONAL
+    );
+    
+    // Capsule-related types and services
+    #ifndef _EFI_CAPSULE_HEADER_DEFINED_
+    #define _EFI_CAPSULE_HEADER_DEFINED_
+    typedef struct {
+        EFI_GUID CapsuleGuid;
+        UINT32   HeaderSize;
+        UINT32   Flags;
+        UINT32   CapsuleImageSize;
+    } EFI_CAPSULE_HEADER;
+    #endif // _EFI_CAPSULE_HEADER_DEFINED_
+    
+    // Additional UEFI 2.0+ services
+    EFI_STATUS (EFIAPI *UpdateCapsule)(
+        IN EFI_CAPSULE_HEADER   **CapsuleHeaderArray,
+        IN UINTN                CapsuleCount,
+        IN EFI_PHYSICAL_ADDRESS ScatterGatherList OPTIONAL
+    );
+    
+    EFI_STATUS (EFIAPI *QueryCapsuleCapabilities)(
+        IN EFI_CAPSULE_HEADER   **CapsuleHeaderArray,
+        IN UINTN                CapsuleCount,
+        OUT UINT64              *MaximumCapsuleSize,
+        OUT EFI_RESET_TYPE      *ResetType
+    );
+    
+    EFI_STATUS (EFIAPI *QueryVariableInfo)(
+        IN UINT32               Attributes,
+        OUT UINT64              *MaximumVariableStorageSize,
+        OUT UINT64              *RemainingVariableStorageSize,
+        OUT UINT64              *MaximumVariableSize
     );
 } EFI_RUNTIME_SERVICES;
 
 #endif // _EFI_RUNTIME_SERVICES_DEFINED_
 
 // Forward declaration for EFI_BOOT_SERVICES to avoid circular dependencies
-struct _EFI_BOOT_SERVICES;
-typedef struct _EFI_BOOT_SERVICES EFI_BOOT_SERVICES;
 
 // Forward declaration for EFI_SYSTEM_TABLE to avoid circular dependencies
 struct _EFI_SYSTEM_TABLE;

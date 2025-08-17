@@ -10,9 +10,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include <string.h>
-#include <stdio.h>
-#include <time.h>
+#include "platform.h"
+#include "util.h"
+#include "log.h"
 
 // Platform-specific includes
 #if defined(_WIN32)
@@ -25,16 +25,26 @@
 #endif
 
 // Local headers - include order is critical
-// 1. First include efi.h which contains core EFI type definitions
-#include "efi.h"
-// 2. Include types.h for additional type definitions
-#include "types.h"
-// 3. Include efi_wrapper.h which depends on both
-#include "efi_wrapper.h"
-// 4. Include platform-specific definitions
+// 1. First include platform.h for platform-specific definitions
 #include "platform.h"
-// 5. Finally, include the local header
+// 2. Include types.h for core type definitions
+#include "types.h"
+// 3. Include efi.h for EFI-specific types and functions
+#include "efi.h"
+// 4. Finally, include the local header
 #include "util.h"      // Local utility function declarations
+#include "log.h"        // For Log function
+
+// UTF-8 to UCS-2 conversion constants
+#define UTF8_2BYTE_MASK   0xE0
+#define UTF8_2BYTE_BITS   0xC0
+#define UTF8_3BYTE_MASK   0xF0
+#define UTF8_3BYTE_BITS   0xE0
+#define UTF8_4BYTE_MASK   0xF8
+#define UTF8_4BYTE_BITS   0xF0
+#define UTF8_CONTINUATION_MASK  0xC0
+#define UTF8_CONTINUATION_BITS  0x80
+#define UNICODE_REPLACEMENT_CHAR 0xFFFD
 
 // String utility functions
 UINTN StrLen(IN CONST CHAR16 *String) {
@@ -51,30 +61,10 @@ VOID CopyMem(OUT VOID *Destination, IN CONST VOID *Source, IN UINTN Length) {
     while (Length--) *dst++ = *src++;
 }
 
-// Define missing EFI variable attributes if not already defined
-#ifndef EFI_VARIABLE_BOOTSERVICE_ACCESS
-#define EFI_VARIABLE_BOOTSERVICE_ACCESS  0x00000002
-#endif
-
-#ifndef EFI_VARIABLE_RUNTIME_ACCESS
-#define EFI_VARIABLE_RUNTIME_ACCESS      0x00000004
-#endif
-
 // Define ARRAY_SIZE macro if not already defined
 #ifndef ARRAY_SIZE
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #endif
-
-// EFI_FILE_INFO_GUID should be defined in efi.h or platform.h
-// If not, define it here as a fallback
-#ifndef EFI_FILE_INFO_GUID
-#define EFI_FILE_INFO_GUID \
-    { 0x09576e92, 0x6d3f, 0x11d2, {0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b} }
-#endif
-
-// Global system table pointers (declared in platform.c)
-extern EFI_SYSTEM_TABLE *ST;
-extern EFI_RUNTIME_SERVICES *RT;
 
 // Platform-safe wide string concatenation
 #if defined(__linux__) || defined(__linux)
@@ -83,28 +73,6 @@ extern EFI_RUNTIME_SERVICES *RT;
         wcsncat((wchar_t*)dest, (const wchar_t*)src, count);
     }
 #else
-    // EFI version uses StrnCat
-    #define StrnCatW(dest, src, count) StrnCat((dest), (src), (count))
-#endif
-
-// Log buffer for storing log messages
-CHAR16 log_buffer[LOG_BUFFER_SIZE] = {0};
-
-// Define LOG_BUFFER_SIZE if not already defined
-#ifndef LOG_BUFFER_SIZE
-#define LOG_BUFFER_SIZE 4096
-#endif
-
-// GUID for log variable storage
-static EFI_GUID LogVarGuid = {
-    0x03c64761, 0x075f, 0x4dba, 
-    {0xab, 0xfb, 0x2e, 0xd8, 0x9e, 0x18, 0xb2, 0x36}
-};
-
-// Log variable name
-static const CHAR16 LogVarName[] = {'H','a','c','k','B','G','R','T','L','o','g',0};
-
-// gEfiSimpleFileSystemProtocolGuid is defined in efilib.h
 
 // Simple string and memory utility functions
 VOID EFIAPI ZeroMem(IN VOID *Buffer, IN UINTN Size) {
@@ -139,290 +107,6 @@ VOID EFIAPI StrCat(IN OUT CHAR16 *Dest, IN CONST CHAR16 *Src) {
     Dest[i + j] = L'\0';
 }
 
-UINTN EFIAPI UnicodeVSPrint(
-    OUT CHAR16 *Str,
-    IN UINTN StrSize,
-    IN CONST CHAR16 *fmt,
-    IN va_list args) {
-    // Enhanced implementation that handles:
-    // %s - string
-    // %d, %i - signed decimal
-    // %u - unsigned decimal
-    // %x, %X - hexadecimal (lower/uppercase)
-    // %p - pointer (as hex)
-    // %c - character
-    // %r - EFI_STATUS (as hex with 0x prefix)
-    // %llu, %llx, %llX - 64-bit unsigned decimal/hex
-    // %% - literal percent sign
-    
-    UINTN count = 0;
-    const CHAR16 *p = fmt;
-    CHAR16 *buf_ptr = Str;
-    UINTN remaining = (StrSize > 0) ? (StrSize - 1) : 0; // Leave space for null terminator
-    
-    if (Str == NULL || StrSize == 0) {
-        return 0;
-    }
-    
-    while (*p && remaining > 0) {
-        if (*p != '%') {
-            // Regular character
-            *buf_ptr++ = *p++;
-            count++;
-            remaining--;
-            continue;
-        }
-        
-        // Handle format specifier
-        p++; // Skip '%'
-        if (*p == '\0') break; // End of string after '%'
-        
-        // Handle 'l' and 'll' length modifiers
-        BOOLEAN is_long = false;
-        BOOLEAN is_longlong = false;
-        
-        if (*p == 'l') {
-            p++;
-            if (*p == 'l') {
-                is_longlong = true;
-                p++;
-            } else {
-                is_long = true;
-            }
-        }
-        
-        if (*p == '\0') break; // End of string after length modifier
-        
-        // Handle the actual format specifier
-        switch (*p) {
-            case '%': {
-                // Literal percent sign
-                if (remaining > 0) {
-                    *buf_ptr++ = '%';
-                    count++;
-                    remaining--;
-                }
-                break;
-            }
-            
-            case 's': {
-                // String
-                CHAR16 *str = va_arg(args, CHAR16*);
-                if (str == NULL) {
-                    str = (CHAR16*)L"(null)";
-                }
-                while (*str && remaining > 0) {
-                    *buf_ptr++ = *str++;
-                    count++;
-                    remaining--;
-                }
-                break;
-            }
-            
-            case 'd':
-            case 'i':
-            case 'u':
-            case 'x':
-            case 'X': {
-                // Integer types
-                UINT64 num;
-                BOOLEAN is_signed = (*p == 'd' || *p == 'i');
-                BOOLEAN is_hex = (*p == 'x' || *p == 'X');
-                BOOLEAN uppercase = (*p == 'X');
-                
-                // Get the appropriate size argument
-                if (is_longlong) {
-                    num = va_arg(args, UINT64);
-                } else if (is_long) {
-                    num = va_arg(args, UINTN);
-                } else {
-                    num = va_arg(args, UINTN);
-                }
-                
-                // For signed decimal, handle negative numbers
-                if (is_signed && ((INT64)num < 0)) {
-                    if (remaining > 0) {
-                        *buf_ptr++ = '-';
-                        remaining--;
-                        count++;
-                    }
-                    num = -((INT64)num);
-                }
-                
-                // Convert number to string
-                CHAR16 buf[32]; // Enough for 64-bit number in binary
-                INTN i = 0;
-                UINTN base = is_hex ? 16 : 10;
-                
-                if (num == 0) {
-                    buf[i++] = '0';
-                } else {
-                    // Convert number to string in reverse order
-                    while (num > 0 && i < (INTN)(sizeof(buf)/sizeof(buf[0])-1)) {
-                        UINTN digit = num % base;
-                        if (digit < 10) {
-                            buf[i++] = '0' + digit;
-                        } else if (uppercase) {
-                            buf[i++] = 'A' + (digit - 10);
-                        } else {
-                            buf[i++] = 'a' + (digit - 10);
-                        }
-                        num /= base;
-                    }
-                }
-                
-                // Write the number in correct order
-                while (i > 0 && remaining > 0) {
-                    *buf_ptr++ = buf[--i];
-                    count++;
-                    remaining--;
-                }
-                break;
-            }
-            
-            case 'p': {
-                // Pointer (always print as hex with 0x prefix)
-                VOID *ptr = va_arg(args, VOID*);
-                UINTN num = (UINTN)ptr;
-                
-                // Write '0x' prefix
-                if (remaining > 0) { *buf_ptr++ = '0'; remaining--; count++; }
-                if (remaining > 0) { *buf_ptr++ = 'x'; remaining--; count++; }
-                
-                // Convert number to string
-                CHAR16 buf[16]; // Enough for 64-bit pointer
-                INTN i = 0;
-                
-                if (num == 0) {
-                    buf[i++] = '0';
-                } else {
-                    // Convert number to string in reverse order
-                    while (num > 0 && i < (INTN)(sizeof(buf)/sizeof(buf[0])-1)) {
-                        UINTN digit = num % 16;
-                        if (digit < 10) {
-                            buf[i++] = '0' + digit;
-                        } else {
-                            buf[i++] = 'a' + (digit - 10);
-                        }
-                        num /= 16;
-                    }
-                }
-                
-                // Write the number in correct order
-                while (i > 0 && remaining > 0) {
-                    *buf_ptr++ = buf[--i];
-                    count++;
-                    remaining--;
-                }
-                break;
-            }
-            
-            case 'c': {
-                // Character
-                if (remaining > 0) {
-                    *buf_ptr++ = (CHAR16)va_arg(args, int);
-                    count++;
-                    remaining--;
-                }
-                break;
-            }
-            
-            case 'r': {
-                // EFI_STATUS (treated as hex with 0x prefix)
-                EFI_STATUS status = va_arg(args, EFI_STATUS);
-                UINTN num = (UINTN)status;
-                
-                // Write '0x' prefix
-                if (remaining > 0) { *buf_ptr++ = '0'; remaining--; count++; }
-                if (remaining > 0) { *buf_ptr++ = 'x'; remaining--; count++; }
-                
-                // Convert number to string
-                CHAR16 buf[16];
-                INTN i = 0;
-                
-                if (num == 0) {
-                    buf[i++] = '0';
-                } else {
-                    // Convert number to string in reverse order
-                    while (num > 0 && i < (INTN)(sizeof(buf)/sizeof(buf[0])-1)) {
-                        UINTN digit = num % 16;
-                        if (digit < 10) {
-                            buf[i++] = '0' + digit;
-                        } else {
-                            buf[i++] = 'a' + (digit - 10);
-                        }
-                        num /= 16;
-                    }
-                }
-                
-                // Write the number in correct order
-                while (i > 0 && remaining > 0) {
-                    *buf_ptr++ = buf[--i];
-                    count++;
-                    remaining--;
-                }
-                break;
-            }
-            
-            default: {
-                // Unsupported format specifier, just copy it as is
-                if (remaining > 0) { *buf_ptr++ = '%'; remaining--; count++; }
-                // Only skip the format character if it's not the end of string
-                if (*p != '\0' && remaining > 0) { 
-                    *buf_ptr++ = *p; 
-                    remaining--; 
-                    count++; 
-                }
-                break;
-            }
-        }
-        
-        p++; // Move to next character after format specifier
-    }
-    
-    // Null-terminate the string if there's space
-    if (remaining > 0) {
-        *buf_ptr = 0;
-    } else if (StrSize > 0) {
-        // No space left, ensure string is still null-terminated
-        Str[StrSize - 1] = 0;
-    }
-    
-    return count;
-}
-
-/**
- * @brief Output a message to the console and optionally to the log buffer
- * 
- * @param Message The message to output (wide string)
- * 
- * This function outputs the message to the console if available, and also
- * adds it to the log buffer if logging is enabled.
- */
-void LogMessage(IN CONST CHAR16 *Message) {
-    // Output to console if available
-    EFI_SYSTEM_TABLE *SystemTable = (EFI_SYSTEM_TABLE *)ST;
-    if (SystemTable != NULL && SystemTable->ConOut != NULL) {
-        // Cast away const as EFI doesn't use const in its API
-        SystemTable->ConOut->OutputString(SystemTable->ConOut, (CHAR16 *)Message);
-    }
-    
-    // Log to buffer if logging is enabled
-    if (log_buffer[0] != 0) {
-        UINTN msg_len = StrLen(Message);
-        UINTN buf_len = StrLen(log_buffer);
-        
-        // Ensure we don't overflow the buffer
-        if (buf_len + msg_len < LOG_BUFFER_SIZE - 1) {
-            StrCat(log_buffer, Message);
-        } else if (buf_len < LOG_BUFFER_SIZE - 1) {
-            // Truncate the message if it's too long
-            StrnCatW(log_buffer, Message, LOG_BUFFER_SIZE - buf_len - 1);
-            log_buffer[LOG_BUFFER_SIZE - 1] = L'\0'; // Ensure null termination
-        }
-    }
-}
-
 const CHAR16* TmpStr(CHAR8 *src, int length) {
 	static CHAR16 arr[4][16];
 	static int j;
@@ -449,112 +133,6 @@ const CHAR16* TmpIntToStr(UINT32 x) {
 	return &buf[i];
 }
 
-// Log buffer size (if not already defined)
-#ifndef LOG_BUFFER_SIZE
-#define LOG_BUFFER_SIZE (64 * 1024) // 64KB log buffer
-#endif
-
-// Forward declarations for log variables (defined in platform.c)
-extern CHAR16 log_buffer[LOG_BUFFER_SIZE];
-extern CONST CHAR16 LogVarName[];
-extern EFI_GUID LogVarGuid;
-
-/**
- * @brief Log a formatted message with the specified mode
- * 
- * @param mode Logging mode: -1 = print only, 0 = log only, 1 = both
- * @param fmt Format string (supports %s, %d, %x, %p, etc.)
- * @param ... Variable arguments for the format string
- * 
- * This function formats and logs a message according to the specified mode.
- * It supports all standard format specifiers and ensures thread safety.
- */
-void Log(int mode, IN CONST CHAR16 *fmt, ...) {
-    if (!fmt) return;
-    
-    va_list args;
-    CHAR16 buffer[512] = {0};  // Buffer for formatted output
-    CHAR16 time_buf[16] = {0}; // Buffer for timestamp
-    
-    // Add timestamp (simplified for Linux build)
-    time_buf[0] = L'[';
-    time_buf[1] = L'0';
-    time_buf[2] = L'0';
-    time_buf[3] = L':';
-    time_buf[4] = L'0';
-    time_buf[5] = L'0';
-    time_buf[6] = L':';
-    time_buf[7] = L'0';
-    time_buf[8] = L'0';
-    time_buf[9] = L']';
-    time_buf[10] = L' ';
-    time_buf[11] = L'\0';
-    
-    // Format the message
-    va_start(args, fmt);
-    UnicodeVSPrint(buffer, ARRAY_SIZE(buffer), fmt, args);
-    va_end(args);
-    
-    // Output the message to console if requested
-    if (mode >= 0 && ST && ST->ConOut && ST->ConOut->OutputString) {
-        // Only output to console if not in silent mode
-        if (mode != -1) {
-            // Add timestamp if available
-            if (time_buf[0]) {
-                ST->ConOut->OutputString(ST->ConOut, time_buf);
-            }
-            // Output the actual message
-            ST->ConOut->OutputString(ST->ConOut, buffer);
-        }
-    }
-    
-    // Add to log buffer if logging is enabled
-    if (mode > 0) {
-        UINTN log_len = StrLen(log_buffer);
-        UINTN time_len = StrLen(time_buf);
-        UINTN buf_len = StrLen(buffer);
-        UINTN msg_len = time_len + buf_len;
-        
-        // Check if we need to make room
-        if (log_len + msg_len + 1 >= ARRAY_SIZE(log_buffer)) {
-            // Move log content up to make room
-            UINTN shift = (log_len + msg_len + 2) - ARRAY_SIZE(log_buffer);
-            if (shift < log_len) {
-                // If we have enough content to shift
-                CopyMem(log_buffer, &log_buffer[shift], (log_len - shift) * sizeof(CHAR16));
-                log_len -= shift;
-                log_buffer[log_len] = 0;
-            } else {
-                // Not enough content to shift, just clear it
-                log_len = 0;
-                log_buffer[0] = 0;
-            }
-        }
-        
-        // Append timestamp and message
-        if (time_buf[0]) {
-            StrCat(log_buffer, time_buf);
-        }
-        StrCat(log_buffer, buffer);
-        
-        // Update UEFI variable if requested and we have runtime services
-        if (RT && RT->SetVariable) {
-            UINTN buffer_size = (StrLen(log_buffer) + 1) * sizeof(CHAR16);
-            RT->SetVariable(LogVarName, &LogVarGuid, 
-                          EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS, 
-                          buffer_size, log_buffer);
-        }
-    }
-}
-
-void DumpLog(void) {
-	ST->ConOut->OutputString(ST->ConOut, log_buffer);
-}
-
-void ClearLogVariable(void) {
-	RT->SetVariable(LogVarName, &LogVarGuid, EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS, 0, 0);
-}
-
 const CHAR16* TrimLeft(const CHAR16* s) {
 	// Skip white-space and BOM.
 	while (s[0] == L'\xfeff' || s[0] == ' ' || s[0] == '\t') {
@@ -571,11 +149,204 @@ const CHAR16* StrStr(const CHAR16* haystack, const CHAR16* needle) {
 		}
 		++haystack;
 	}
-	return 0;
+	return NULL;
 }
 
 const CHAR16* StrStrAfter(const CHAR16* haystack, const CHAR16* needle) {
 	return (haystack = StrStr(haystack, needle)) ? haystack + StrLen(needle) : 0;
+}
+
+/**
+ * Convert a UTF-8 encoded string to UCS-2 (UTF-16) encoding.
+ *
+ * @param[in]  utf8      Input UTF-8 string (null-terminated)
+ * @param[out] ucs2      Output buffer for UCS-2 string
+ * @param[in]  ucs2_len  Size of output buffer in CHAR16 elements (including null terminator)
+ * @return Number of CHAR16 characters written (excluding null terminator) or 0 on error
+ */
+UINTN UTF8ToUCS2(CHAR8 *utf8, CHAR16 *ucs2, UINTN ucs2_len) {
+    if (!utf8 || !ucs2 || ucs2_len == 0) {
+        Log(1, EFI_STR("Error: Invalid parameters to UTF8ToUCS2\r\n"));
+        return 0;
+    }
+
+    UINTN i = 0;      // Input index (bytes in UTF-8)
+    UINTN j = 0;      // Output index (CHAR16s in UCS-2)
+    
+    // Leave space for null terminator
+    UINTN max_output = ucs2_len - 1;
+    
+    while (utf8[i] != '\0' && j < max_output) {
+        UINT32 code_point = 0;
+        UINT8 first_byte = utf8[i++];
+        
+        // 1-byte sequence (0xxxxxxx)
+        if ((first_byte & 0x80) == 0) {
+            code_point = first_byte;
+        }
+        // 2-byte sequence (110xxxxx 10xxxxxx)
+        else if ((first_byte & UTF8_3BYTE_MASK) == UTF8_2BYTE_BITS) {
+            if (utf8[i] == '\0') break;  // Incomplete sequence
+            code_point = ((first_byte & 0x1F) << 6) | (utf8[i++] & 0x3F);
+        }
+        // 3-byte sequence (1110xxxx 10xxxxxx 10xxxxxx)
+        else if ((first_byte & UTF8_4BYTE_MASK) == UTF8_3BYTE_BITS) {
+            if (utf8[i] == '\0' || utf8[i+1] == '\0') break;  // Incomplete sequence
+            code_point = ((first_byte & 0x0F) << 12) | 
+                        ((utf8[i] & 0x3F) << 6) | 
+                        (utf8[i+1] & 0x3F);
+            i += 2;
+        }
+        // 4-byte sequence (11110xxx 10xxxxxx 10xxxxxx 10xxxxxx) - will be converted to surrogate pair
+        else if ((first_byte & 0xF8) == 0xF0) {
+            if (utf8[i] == '\0' || utf8[i+1] == '\0' || utf8[i+2] == '\0') break;  // Incomplete sequence
+            
+            // Decode the full 21-bit code point
+            code_point = ((first_byte & 0x07) << 18) |
+                        ((utf8[i] & 0x3F) << 12) |
+                        ((utf8[i+1] & 0x3F) << 6) |
+                        (utf8[i+2] & 0x3F);
+            i += 3;
+            
+            // Check if we have space for surrogate pair (2 CHAR16s)
+            if (j + 1 >= max_output) {
+                // Not enough space for surrogate pair, skip this character
+                Log(1, EFI_STR("Warning: Not enough space for surrogate pair in UTF8ToUCS2\r\n"));
+                continue;
+            }
+            
+            // Convert to UTF-16 surrogate pair
+            if (code_point <= 0x10FFFF) {
+                code_point -= 0x10000;
+                ucs2[j++] = (CHAR16)(0xD800 | ((code_point >> 10) & 0x3FF));  // High surrogate
+                ucs2[j++] = (CHAR16)(0xDC00 | (code_point & 0x3FF));          // Low surrogate
+            } else {
+                // Invalid code point, use replacement character
+                ucs2[j++] = UNICODE_REPLACEMENT_CHAR;
+            }
+            continue;
+        } else {
+            // Invalid UTF-8 sequence, skip this byte or use replacement character
+            ucs2[j++] = UNICODE_REPLACEMENT_CHAR;
+            continue;
+        }
+        
+        // For 1-3 byte sequences, store the code point directly
+        if (code_point <= 0xFFFF) {
+            // Check for surrogate range (0xD800-0xDFFF) which is invalid in UTF-16
+            if (code_point >= 0xD800 && code_point <= 0xDFFF) {
+                ucs2[j++] = UNICODE_REPLACEMENT_CHAR;
+            } else {
+                ucs2[j++] = (CHAR16)code_point;
+            }
+        } else if (code_point <= 0x10FFFF) {
+            // Check if we have space for surrogate pair (2 CHAR16s)
+            if (j + 1 >= max_output) {
+                // Not enough space for surrogate pair, skip this character
+                Log(1, EFI_STR("Warning: Not enough space for surrogate pair in UTF8ToUCS2\r\n"));
+                continue;
+            }
+            
+            // Convert to UTF-16 surrogate pair
+            code_point -= 0x10000;
+            ucs2[j++] = (CHAR16)(0xD800 | ((code_point >> 10) & 0x3FF));  // High surrogate
+            ucs2[j++] = (CHAR16)(0xDC00 | (code_point & 0x3FF));          // Low surrogate
+        } else {
+            // Invalid code point, use replacement character
+            ucs2[j++] = UNICODE_REPLACEMENT_CHAR;
+        }
+    }
+    
+    // Null-terminate the output string
+    ucs2[j] = L'\0';
+    
+    return j;
+}
+
+/**
+ * Convert an ASCII string to a dynamically allocated CHAR16 string.
+ *
+ * @param[in] str  Input ASCII string (null-terminated)
+ * @return Pointer to the allocated CHAR16 string, or NULL on failure
+ */
+CHAR16* AsciiToChar16(const char* str) {
+    if (!str) return NULL;
+    
+    // Calculate the length of the input string
+    UINTN len = 0;
+    while (str[len] != '\0') len++;
+    
+    // Allocate memory for the result (len + 1 for null terminator)
+    CHAR16* result = NULL;
+    EFI_STATUS status = gBS->AllocatePool(EfiLoaderData, (len + 1) * sizeof(CHAR16), (VOID**)&result);
+    if (EFI_ERROR(status) || !result) {
+        Log(1, EFI_STR("Error: Failed to allocate memory in AsciiToChar16\r\n"));
+        return NULL;
+    }
+    
+    // Convert each character from ASCII to CHAR16
+    for (UINTN i = 0; i < len; i++) {
+        result[i] = (CHAR16)(UINT8)str[i];  // Cast to UINT8 first to ensure proper extension
+    }
+    
+    // Null-terminate the result string
+    result[len] = L'\0';
+    
+    return result;
+}
+
+/**
+ * Safely convert a wide string to a 32-bit integer with overflow checking.
+ *
+ * @param[in]  str     The wide string to convert (must be null-terminated)
+ * @param[out] result  Pointer to store the converted integer
+ * @return BOOLEAN     TRUE if conversion was successful, FALSE on overflow or invalid input
+ */
+BOOLEAN SafeAtoi(const CHAR16* str, INT32* result) {
+    UINTN i = 0;
+    int sign = 1;
+    INT64 value = 0;
+    
+    if (!str || !result) {
+        return FALSE;
+    }
+    
+    // Skip leading whitespace
+    while (str[i] == L' ' || str[i] == L'\t') {
+        i++;
+    }
+    
+    // Handle optional sign
+    if (str[i] == L'-') {
+        sign = -1;
+        i++;
+    } else if (str[i] == L'+') {
+        i++;
+    }
+    
+    // Process digits
+    BOOLEAN has_digits = FALSE;
+    while (str[i] >= L'0' && str[i] <= L'9') {
+        has_digits = TRUE;
+        
+        // Check for overflow before multiplying by 10
+        if (value > (INT64_MAX / 10) || 
+            (value == (INT64_MAX / 10) && (str[i] - L'0') > (INT64_MAX % 10))) {
+            return FALSE; // Overflow would occur
+        }
+        
+        value = value * 10 + (str[i] - L'0');
+        i++;
+    }
+    
+    // Apply sign and check for 32-bit overflow
+    value *= sign;
+    if (value > INT32_MAX || value < INT32_MIN) {
+        return FALSE;
+    }
+    
+    *result = (INT32)value;
+    return has_digits; // Return FALSE if no digits were found
 }
 
 UINT64 Random_a, Random_b;
@@ -652,29 +423,18 @@ void* LoadFileWithPadding(EFI_FILE_HANDLE dir, const CHAR16* path, UINTN* size_p
 
     // Validate input parameters
     if (!dir || !path || !path[0] || !size_ptr) {
-        Log(1, L"LoadFileWithPadding: Invalid parameters. dir: %p, path: %s, size_ptr: %p\n", 
-            dir, path ? path : L"NULL", size_ptr);
         return NULL;
     }
-
-    Log(1, L"LoadFileWithPadding: Attempting to open file: %s\n", path);
-    Log(1, L"Directory handle: %p\n", dir);
 
     // First try to open the file directly
     e = dir->Open(dir, &handle, path, EFI_FILE_MODE_READ, 0);
     if (EFI_ERROR(e)) {
-        Log(1, L"LoadFileWithPadding: Failed to open file. Status: %r\n", e);
-        
         // Try to get directory info for better error reporting
         e = dir->GetInfo(dir, &gEfiFileInfoGuid, &info_size, NULL);
         if (e == EFI_BUFFER_TOO_SMALL) {
             file_info = (EFI_FILE_INFO*)PLAT_ALLOCATE_POOL(info_size);
             if (file_info) {
                 e = dir->GetInfo(dir, &gEfiFileInfoGuid, &info_size, file_info);
-                if (!EFI_ERROR(e)) {
-                    Log(1, L"Directory attributes: 0x%lx, Size: %lu\n", 
-                        (UINT64)file_info->Attribute, (UINT64)file_info->FileSize);
-                }
                 PLAT_FREE_POOL(file_info);
             }
         }
@@ -684,7 +444,6 @@ void* LoadFileWithPadding(EFI_FILE_HANDLE dir, const CHAR16* path, UINTN* size_p
     // Get file size
     e = handle->SetPosition(handle, ~(UINT64)0);
     if (EFI_ERROR(e)) {
-        Log(1, L"LoadFileWithPadding: Failed to seek to end of file. Status: %r\n", e);
         handle->Close(handle);
         return NULL;
     }
@@ -692,7 +451,6 @@ void* LoadFileWithPadding(EFI_FILE_HANDLE dir, const CHAR16* path, UINTN* size_p
     UINT64 file_size = 0;
     e = handle->GetPosition(handle, &file_size);
     if (EFI_ERROR(e)) {
-        Log(1, L"LoadFileWithPadding: Failed to get file size. Status: %r\n", e);
         handle->Close(handle);
         return NULL;
     }
@@ -747,3 +505,4 @@ void* LoadFileWithPadding(EFI_FILE_HANDLE dir, const CHAR16* path, UINTN* size_p
     
     return data;
 }
+#endif

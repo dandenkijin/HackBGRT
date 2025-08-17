@@ -1,33 +1,44 @@
 # UEFI Makefile for HackBGRT
-# This Makefile builds the UEFI application on Linux using MinGW-w64 cross-compiler
+# This Makefile builds the UEFI application on Linux using gnu-efi
 
 # Target architecture (x86_64, i686)
 ARCH ?= x86_64
 
-# Toolchain
+# Toolchain - Use system gcc for gnu-efi
+CC = gcc
+LD = ld
+OBJCOPY = objcopy
+
+# Architecture settings
 ifeq ($(ARCH),x86_64)
-    CC = x86_64-w64-mingw32-gcc
-    LD = x86_64-w64-mingw32-ld
-    OBJCOPY = x86_64-w64-mingw32-objcopy
     EFI_ARCH = x86_64
+    ARCH_CFLAGS = -m64 -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -mno-3dnow
+    ARCH_LDFLAGS = -melf_x86_64
 else ifeq ($(ARCH),i686)
-    CC = i686-w64-mingw32-gcc
-    LD = i686-w64-mingw32-ld
-    OBJCOPY = i686-w64-mingw32-objcopy
     EFI_ARCH = ia32
+    ARCH_CFLAGS = -m32 -march=i686 -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -mno-3dnow
+    ARCH_LDFLAGS = -melf_i386
 else
     $(error Unsupported architecture: $(ARCH))
 endif
 
-# Paths - Use local gnu-efi submodule
-GNUEFI_PATH = $(shell pwd)/gnu-efi
-EFI_INC = $(GNUEFI_PATH)/inc
-EFI_ARCH_INC = $(GNUEFI_PATH)/inc/$(EFI_ARCH)
-EFI_PROTOCOL_INC = $(GNUEFI_PATH)/inc/protocol
-EFI_LIB = $(GNUEFI_PATH)/$(EFI_ARCH)/lib
+# System gnu-efi paths
+EFI_INC = /usr/include/efi
+EFI_ARCH_INC = /usr/include/efi/$(EFI_ARCH)
+EFI_PROTOCOL_INC = /usr/include/efi/protocol
+EFI_LIB = /usr/lib
 
-# No need for pkg-config with local gnu-efi
-GNUEFI_INC = -I$(EFI_INC) -I$(EFI_ARCH_INC) -I$(EFI_PROTOCOL_INC) -I$(GNUEFI_PATH)/inc/gnuefi
+# System C headers path
+SYSROOT = $(shell gcc -print-sysroot)
+C_INCLUDE = /usr/include
+
+# Include paths
+GNUEFI_INC = -I$(EFI_INC) \
+              -I$(EFI_ARCH_INC) \
+              -I$(EFI_PROTOCOL_INC) \
+              -I/usr/include/efi/gnuefi \
+              -isystem $(C_INCLUDE) \
+              -isystem $(C_INCLUDE)/x86_64-linux-gnu
 
 # Flags
 CFLAGS = -Wall -Wextra -Werror \
@@ -38,21 +49,35 @@ CFLAGS = -Wall -Wextra -Werror \
          -I$(EFI_ARCH_INC) \
          -I$(EFI_PROTOCOL_INC) \
          $(GNUEFI_INC) \
-         -ffreestanding \
          -fno-stack-protector \
          -fno-stack-check \
          -fshort-wchar \
+         -fno-strict-aliasing \
+         -fno-merge-constants \
+         -fno-builtin \
+         -ffreestanding \
+         -fpic \
+         -fno-exceptions \
+         -fno-asynchronous-unwind-tables \
+         -mno-sse \
+         -mno-mmx \
+         -mno-sse2 \
+         -mno-3dnow \
          -mno-red-zone \
-         -mno-avx \
          -maccumulate-outgoing-args \
-         -DEFI_FUNCTION_WRAPPER \
-         -DGNU_EFI_USE_MS_ABI
+         -DGNU_EFI_USE_MS_ABI \
+         -D__KERNEL__ \
+         -D__EFI__ \
+         -D__$(shell echo $(EFI_ARCH) | tr '[:lower:]' '[:upper:]')__ \
+         -isystem /usr/include \
+         -nodefaultlibs \
+         $(ARCH_CFLAGS)
 
-# Our local source files (exclude globals.c as it's included separately)
-SRCS = $(filter-out src/globals.c,$(wildcard src/*.c))
+# Our local source files
+SRCS = $(wildcard src/*.c)
 LOCAL_OBJS = $(SRCS:%.c=%.o)
 
-# Our globals.c needs to be compiled with EFI flags
+# All objects need to be compiled with EFI flags
 GNUEFI_OBJS = src/globals.o
 
 # All objects to link

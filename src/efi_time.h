@@ -9,9 +9,8 @@
 #ifndef _EFI_TIME_H_
 #define _EFI_TIME_H_
 
-// Include only the basic type definitions we need
-#include <stdint.h>
-#include <stdbool.h>
+// Use our custom standard type definitions
+#include "efi_stdint.h"
 
 // Define basic types if not already defined
 #ifndef UINT16

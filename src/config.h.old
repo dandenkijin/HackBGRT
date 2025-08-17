@@ -1,0 +1,230 @@
+/**
+ * @file config.h
+ * @brief Configuration handling for HackBGRT
+ * 
+ * This header defines the interface for reading and parsing HackBGRT configuration files.
+ * It includes structures for storing configuration parameters and functions for loading
+ * configurations from files in the EFI system partition.
+ */
+
+#ifndef _HACKBGRT_CONFIG_H_
+#define _HACKBGRT_CONFIG_H_
+
+// Include platform-specific type definitions
+#include "platform.h"
+// Include core type definitions
+#include "types.h"
+
+// Platform-specific includes
+#ifdef _WIN32
+    #include <windows.h>
+#elif defined(__linux__) || defined(__linux)
+    #include <wchar.h>
+    #include <stdlib.h>
+    #include <unistd.h>
+    #include <sys/time.h>
+#endif
+
+// Ensure EFI_OUT_OF_RESOURCES is defined
+#ifndef EFI_OUT_OF_RESOURCES
+#define EFI_OUT_OF_RESOURCES (-5)
+#endif
+
+// Ensure proper string literal handling for EFI
+#ifndef _WIN32
+#include <wchar.h>
+#endif
+
+// Include EFI type definitions
+#include "efi_types.h"
+
+// Constants for configuration
+#ifndef DEFAULT_COORDINATE
+#define DEFAULT_COORDINATE -1000000
+#endif
+
+// Helper macro to create a wide string literal
+#define WIDE_STRING(str) L##str
+
+// Version string accessor
+const CHAR16* GetVersionString(void);
+
+// Convenience macro for accessing the version string
+#define HACKBGRT_VERSION_STRING GetVersionString()
+
+// Configuration-specific string constants
+#define STR_DEBUG     EFI_STR("debug")
+#define STR_LOG       EFI_STR("log")
+#define STR_IMAGE     EFI_STR("image")
+#define STR_BOOT      EFI_STR("boot")
+#define STR_CONFIG    EFI_STR("config")
+#define STR_RESOLUTION EFI_STR("resolution")
+#define STR_RANDOM    EFI_STR("random")
+
+// Configuration command literals
+#define STR_REMOVE    EFI_STR("remove")
+#define STR_BLACK     EFI_STR("black")
+#define STR_N         EFI_STR("n=")
+#define STR_X         EFI_STR("x=")
+#define STR_Y         EFI_STR("y=")
+#define STR_O         EFI_STR("o=")
+#define STR_PATH      EFI_STR("path=")
+#define STR_X_CHAR    'x'
+
+// Configuration buffer sizes
+#define MAX_PATH_LENGTH  4096
+#define MAX_LINE_LENGTH  8192
+
+// Default values
+#define DEFAULT_WEIGHT 1
+
+// Version information function
+extern const CHAR16 *GetVersionString(void);
+
+// Error and info message constants
+#define MSG_ERR_INVALID_PARAMS EFI_STR("Error: Invalid parameters to %s\r\n")
+#define MSG_ERR_PATH_TOO_LONG EFI_STR("Error: Config file path too long (max %d characters)\r\n")
+#define MSG_ERR_FILE_TOO_LARGE EFI_STR("Error: Config file too large (%lu bytes, max 1MB)\r\n")
+#define MSG_ERR_CONVERT_UCS2 EFI_STR("Error: Failed to convert file to UCS-2\r\n")
+#define MSG_DEBUG_MODE EFI_STR("Debug mode %s\r\n")
+#define MSG_LOGGING_STATUS EFI_STR("Logging %s\r\n")
+#define MSG_PROCESSING_IMAGE EFI_STR("Processing image configuration: %s\r\n")
+#define MSG_BOOT_PATH_SET EFI_STR("Set boot path to: %s\r\n")
+#define MSG_LOADING_CONFIG EFI_STR("Loading included config file: %s\r\n")
+#define MSG_LOAD_CONFIG_FAILED EFI_STR("Failed to load included config file: %s\r\n")
+#define MSG_SETTING_RESOLUTION EFI_STR("Setting resolution: %s\r\n")
+#define MSG_UNKNOWN_DIRECTIVE EFI_STR("Warning: Unknown configuration directive: %s\r\n")
+#define MSG_ACTION_KEEP EFI_STR("keep")
+#define MSG_ACTION_REMOVE EFI_STR("remove")
+#define MSG_ACTION_BLACK EFI_STR("black")
+#define MSG_USING_IMAGE EFI_STR("Using n=%d, action=%d, x=%d, y=%d, o=%d, path=%s, rand=%lx/%lx\r\n")
+#define MSG_SKIPPING_IMAGE EFI_STR("Skipping n=%d, action=%d, x=%d, y=%d, o=%d, path=%s, rand=%lx/%lx\r\n")
+#define MSG_ERR_PATH_COPY EFI_STR("Warning: Failed to allocate memory for path copy\r\n")
+#define MSG_ERR_OPEN_CONFIG EFI_STR("Error: Failed to open config file: %s (error: %r)\r\n")
+#define MSG_ERR_ALLOC_FILE_INFO EFI_STR("Error: Failed to allocate %lu bytes for file info\r\n")
+#define MSG_ERR_GET_FILE_INFO EFI_STR("Error: Failed to get file info: %r\r\n")
+#define MSG_ERR_ALLOC_FILE_DATA EFI_STR("Error: Failed to allocate %lu bytes for file data\r\n")
+#define MSG_ERR_ALLOC_UCS2 EFI_STR("Error: Failed to allocate %lu bytes for UCS-2 data\r\n")
+#define MSG_ERR_ALLOC_MEMORY EFI_STR("Error: Failed to allocate %lu bytes of memory\r\n")
+#define MSG_ERR_INVALID_WEIGHT EFI_STR("Error: Invalid weight value: %d (must be positive)\r\n")
+#define MSG_ERR_INVALID_RESOLUTION EFI_STR("Error: Invalid resolution: %dx%d (must be non-zero)\r\n")
+#define MSG_INFO_RESOLUTION_SET EFI_STR("Resolution set to %dx%d\r\n")
+#define MSG_ERR_INVALID_PARAMS_RESOLUTION EFI_STR("Error: Invalid parameters to ReadConfigResolution\r\n")
+#define MSG_ERR_INVALID_RESOLUTION_FORMAT EFI_STR("Invalid resolution format (expected WxH): %s\r\n")
+#define MSG_WARN_WEIGHT_OVERFLOW EFI_STR("Warning: Weight sum overflow, resetting to weight\r\n")
+#define MSG_ERR_INVALID_IMAGE_PARAMS EFI_STR("Error: Invalid parameters to ReadConfigImage\r\n")
+#define MSG_ERR_INVALID_IMAGE_LINE EFI_STR("Error: Invalid image line (missing action or path): %s\r\n")
+#define MSG_ERR_INCLUDE_TOO_DEEP EFI_STR("Error: Maximum include depth (%d) exceeded, possible include loop\r\n")
+#define MSG_ERR_OPEN_FILE EFI_STR("Error: Failed to open file: %s (error: %r)\r\n")
+#define MSG_ERR_READ_FILE EFI_STR("Error: Failed to read file: %s (error: %r)\r\n")
+// #define MSG_ERR_FILE_TOO_LARGE EFI_STR("Error: File too large: %s (max %d bytes)\r\n")
+
+/**
+ * @brief Possible actions to perform on the BGRT (Boot Graphics Resource Table)
+ * 
+ * These actions determine how HackBGRT will modify or interact with the system's
+ * boot splash screen.
+ */
+typedef enum {
+    HackBGRT_KEEP = 0,   /**< Keep the original BGRT without modifications */
+    HackBGRT_REPLACE,    /**< Replace the boot splash with a custom image */
+    HackBGRT_REMOVE      /**< Remove the boot splash entirely */
+} HackBGRT_action;
+
+/**
+ * @brief Special coordinate values for image positioning
+ * 
+ * These special values can be used for image coordinates to indicate special behavior
+ * rather than absolute pixel positions.
+ */
+typedef enum {
+    HackBGRT_coord_keep = -1000001  /**< Keep the original coordinate value */
+} HackBGRT_coordinate;
+
+/**
+ * @brief Main configuration structure for HackBGRT
+ * 
+ * This structure holds all configuration parameters that control the behavior
+ * of the HackBGRT application. It's populated by parsing configuration files
+ * and used throughout the application to determine how to modify the boot graphics.
+ */
+typedef struct HackBGRT_config {
+    /** @brief Enable debug output (non-zero to enable) */
+    int debug;
+    
+    /** @brief Enable logging (non-zero to enable) */
+    int log;
+    
+    /** @brief Action to perform on the BGRT */
+    HackBGRT_action action;
+    
+    /** @brief Path to the image file for replacement (NULL if not set) */
+    const CHAR16* image_path;
+    
+    /** @brief X position of the image (pixels from left, or special value) */
+    int image_x;
+    
+    /** @brief Y position of the image (pixels from top, or special value) */
+    int image_y;
+    
+    /** @brief Sum of weights for random image selection */
+    int image_weight_sum;
+    
+    /** @brief Image orientation (0-3, representing 0°, 90°, 180°, 270°) */
+    int orientation;
+    
+    /** @brief Target horizontal resolution (0 to use native) */
+    int resolution_x;
+    
+    /** @brief Target vertical resolution (0 to use native) */
+    int resolution_y;
+    
+    /** @brief Original horizontal resolution (for restoration) */
+    int old_resolution_x;
+    
+    /** @brief Original vertical resolution (for restoration) */
+    int old_resolution_y;
+    
+    /** @brief Path to the boot application (NULL if not set) */
+    const CHAR16* boot_path;
+    
+    /** 
+     * @brief Whether image_path was dynamically allocated
+     * 
+     * This flag indicates whether the memory pointed to by image_path was
+     * allocated by the config module and needs to be freed when no longer needed.
+     */
+    BOOLEAN image_path_allocated;
+} HackBGRT_config;
+
+/**
+ * Read a configuration parameter. (May recursively read config files.)
+ *
+ * @param config The configuration to modify.
+ * @param base_dir The base directory, in case the parameter contains an include.
+ * @param line The configuration line to parse.
+ */
+extern void EFIAPI ReadConfigLine(HackBGRT_config* config, EFI_FILE_PROTOCOL* base_dir, const CHAR16* line);
+
+/**
+ * Read a configuration file. (May recursively read more files.)
+ *
+ * @param config The configuration to modify.
+ * @param base_dir The base directory.
+ * @param path The path to the file.
+ * @return FALSE, if the file couldn't be read, TRUE otherwise.
+ */
+extern BOOLEAN EFIAPI ReadConfigFile(HackBGRT_config* config, EFI_FILE_PROTOCOL* base_dir, const CHAR16* path);
+
+/* EFI API function declarations - now in efi_types.h */
+
+/* Internal function declarations */
+static CHAR16* AsciiToChar16(const char* str);
+static void ReadConfigImage(HackBGRT_config* config, const CHAR16* line);
+static void ReadConfigResolution(HackBGRT_config* config, const CHAR16* line);
+static BOOLEAN SafeAtoi(const CHAR16* str, INT32* result);
+static void SetBMPWithRandom(HackBGRT_config* config, int weight, HackBGRT_action action, 
+                            int x, int y, int o, const CHAR16* path);
+static INT32 ParseCoordinate(const CHAR16* str, HackBGRT_action action);
+
+#endif /* _HACKBGRT_CONFIG_H_ */

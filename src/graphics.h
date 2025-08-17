@@ -89,4 +89,28 @@ typedef struct _EFI_GRAPHICS_OUTPUT_PROTOCOL {
     EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE        *Mode;
 } EFI_GRAPHICS_OUTPUT_PROTOCOL;
 
+/**
+ * Get the Graphics Output Protocol (GOP) instance.
+ * 
+ * @return A pointer to the GOP instance, or NULL if not found.
+ */
+EFI_GRAPHICS_OUTPUT_PROTOCOL *GetGOP(VOID);
+
+/**
+ * Get the GOP (Graphics Output Protocol) pointer.
+ * 
+ * @return A pointer to the GOP instance, or NULL if not found.
+ */
+EFI_GRAPHICS_OUTPUT_PROTOCOL* GOP(VOID);
+
+/**
+ * Set screen resolution. If there is no exact match, try to find a bigger one.
+ *
+ * @param w Horizontal resolution. 0 for max, -1 for current.
+ * @param h Vertical resolution. 0 for max, -1 for current.
+ * @param config Pointer to the configuration structure containing resolution settings
+ * @param debug Enable debug logging if true
+ */
+VOID SetResolution(IN INT32 w, IN INT32 h, IN OUT struct HackBGRT_config *config, IN BOOLEAN debug);
+
 #endif // GRAPHICS_H

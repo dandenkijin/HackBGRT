@@ -1,96 +1,141 @@
-#include "efi.h"
-#include "util.h"
-#include "platform.h"  // For platform-specific macros
-
-// Only include our implementations when not using gnu-efi's
-#ifndef __MAKEWITH_GNUEFI
-
-// Local implementation of AllocatePool to avoid symbol conflicts
-VOID *EFIAPI LocalAllocatePool(IN UINTN Size) {
-    VOID *Buffer = NULL;
-    if (BS && BS->AllocatePool) {
-        EFI_STATUS Status = BS->AllocatePool(EfiLoaderData, Size, &Buffer);
-        if (EFI_ERROR(Status) || !Buffer) {
-            return NULL;
-        }
-    }
-    return Buffer;
-}
-
+// For GNU-EFI builds, include the system EFI headers first
+#ifdef USING_GNU_EFI
+#include <efi.h>
+#include <efilib.h>
+#include <efiprot.h>
+#include <efidef.h>
 #else
-// When using gnu-efi, we still need to define BS for our implementations
+// For non-GNU-EFI builds, include our headers in the correct order
+#include "platform.h"  // Must be first to define EFI types
+#include "efi.h"       // Defines EFI types and constants
+#include "util.h"      // Utility functions
+
+// For non-gnu-efi builds, we need to ensure BS is declared
 extern EFI_BOOT_SERVICES *BS;
-#endif // !__MAKEWITH_GNUEFI
+#endif
 
 // Implementation of CopyMem that matches gnu-efi's signature
-VOID EFIAPI CopyMem(IN VOID *Destination, IN VOID *Source, IN UINTN Length) {
+VOID EFIAPI CopyMem(IN VOID *Destination, IN CONST VOID *Source, IN UINTN Length) {
     if (BS && BS->CopyMem) {
-        BS->CopyMem(Destination, Source, Length);
+        BS->CopyMem(Destination, (VOID *)Source, Length);
     } else {
         // Fallback implementation if BS->CopyMem is not available
         UINT8 *dst = Destination;
-        UINT8 *src = Source;
+        CONST UINT8 *src = Source;
         while (Length-- > 0) {
             *dst++ = *src++;
         }
     }
 }
 
-// New implementations of some functions in gnu-efi.
-// These functions are designed to avoid other gnu-efi calls.
+// Implementation of StrLen
+UINTN EFIAPI StrLen(IN CONST CHAR16 *String) {
+    UINTN Length = 0;
+    if (String != NULL) {
+        while (*String++ != L'\0') {
+            Length++;
+        }
+    }
+    return Length;
+}
 
 EFI_STATUS LibLocateProtocol(IN EFI_GUID *ProtocolGuid, OUT VOID **Interface) {
 	EFI_HANDLE buffer[256];
 	UINTN size = sizeof(buffer);
-	if (!EFI_ERROR(BS->LocateHandle(ByProtocol, ProtocolGuid, NULL, &size, buffer))) {
+	if (!EFI_ERROR(BS->LocateHandle(2 /* ByProtocol */, ProtocolGuid, NULL, &size, buffer))) {
 		for (int i = 0; i < size / sizeof(EFI_HANDLE); ++i) {
 			if (!EFI_ERROR(BS->HandleProtocol(buffer[i], ProtocolGuid, Interface))) {
 				return EFI_SUCCESS;
 			}
 		}
 	}
-	return EFI_NOT_FOUND;
+	// Return error code 0x8000000000000006 (EFI_NOT_FOUND)
+	return (EFI_STATUS)0x8000000000000006;
 }
 
-EFI_DEVICE_PATH *FileDevicePath(IN EFI_HANDLE Device OPTIONAL, IN CHAR16 *FileName) {
-	EFI_DEVICE_PATH *old_path = 0;
-	if (!Device || EFI_ERROR(BS->HandleProtocol(Device, TmpGuidPtr((EFI_GUID) EFI_DEVICE_PATH_PROTOCOL_GUID), (void**)&old_path))) {
-		static EFI_DEVICE_PATH end_path = {END_DEVICE_PATH_TYPE, END_ENTIRE_DEVICE_PATH_SUBTYPE, {sizeof(end_path), 0}};
-		old_path = &end_path;
-	}
-	UINTN old_path_size = 0, instances = 0;
-	for (EFI_DEVICE_PATH *p0 = old_path;; p0 = NextDevicePathNode(p0)) {
-		old_path_size += DevicePathNodeLength(p0);
+// Implementation of FileDevicePath function
+EFI_DEVICE_PATH_PROTOCOL *FileDevicePath(
+    IN EFI_HANDLE Device OPTIONAL,
+    IN CONST CHAR16 *FileName
+) {
+    EFI_DEVICE_PATH_PROTOCOL *old_path = NULL;
+    EFI_DEVICE_PATH_PROTOCOL *new_path = NULL;
+    EFI_DEVICE_PATH_PROTOCOL *p0;
+    EFI_DEVICE_PATH_PROTOCOL *p1;
+    UINTN old_path_size = 0;
+    UINTN instances = 0;
+    UINTN size_str, size_fdp;
+    
+    // Handle NULL device case
+    if (Device != NULL) {
+        EFI_DEVICE_PATH_PROTOCOL *device_path = NULL;
+        EFI_STATUS status = BS->HandleProtocol(
+            Device,
+            &gEfiDevicePathProtocolGuid,
+            (VOID**)&device_path
+        );
+        if (!EFI_ERROR(status)) {
+            old_path = device_path;
+        }
+    }
+    
+    // If no device or protocol not found, use empty path
+    if (old_path == NULL) {
+        static EFI_DEVICE_PATH_PROTOCOL end_path = {
+            .Type = END_DEVICE_PATH_TYPE,
+            .SubType = END_ENTIRE_DEVICE_PATH_SUBTYPE,
+            .Length = {END_DEVICE_PATH_LENGTH, 0}
+        };
+        old_path = &end_path;
+    }
+    
+    // Calculate required buffer size
+    for (p0 = old_path; ; p0 = NextDevicePathNode(p0)) {
+        old_path_size += DevicePathNodeLength(p0);
+        if (IsDevicePathEndType(p0)) {
+            instances++;
+        }
+        if (IsDevicePathEnd(p0)) {
+            break;
+        }
+    }
+
+    size_str = (StrLen(FileName) + 1) * sizeof(CHAR16);
+    size_fdp = SIZE_OF_FILEPATH_DEVICE_PATH + size_str;
+    
+    // Allocate new path buffer
+    new_path = (EFI_DEVICE_PATH_PROTOCOL *)PLAT_ALLOCATE_POOL(
+        old_path_size + instances * size_fdp
+    );
+    
+    if (!new_path) {
+        return NULL;
+    }
+
+	p1 = new_path;
+	for (p0 = old_path;; p0 = NextDevicePathNode(p0)) {
 		if (IsDevicePathEndType(p0)) {
-			instances += 1;
-		}
-		if (IsDevicePathEnd(p0)) {
-			break;
-		}
-	}
-
-	UINTN size_str = (StrLen(FileName) + 1) * sizeof(*FileName);
-	UINTN size_fdp = SIZE_OF_FILEPATH_DEVICE_PATH + size_str;
-
-	EFI_DEVICE_PATH *new_path;
-	new_path = PLAT_ALLOCATE_POOL(old_path_size + instances * size_fdp);
-	if (!new_path) {
-		return 0;
-	}
-
-	EFI_DEVICE_PATH *p1 = new_path;
-	for (EFI_DEVICE_PATH *p0 = old_path;; p0 = NextDevicePathNode(p0)) {
-		if (IsDevicePathEndType(p0)) {
-			*p1 = (EFI_DEVICE_PATH) {
-				.Type = MEDIA_DEVICE_PATH,
-				.SubType = MEDIA_FILEPATH_DP,
-				.Length = {size_fdp, size_fdp >> 8},
+			// Initialize file path node
+			FILEPATH_DEVICE_PATH file_path_node = {
+				.Header = {
+					.Type = MEDIA_DEVICE_PATH,
+					.SubType = MEDIA_FILEPATH_DP,
+					.Length = {sizeof(FILEPATH_DEVICE_PATH) + (UINT16)size_str, 0}
+				}
 			};
-			FILEPATH_DEVICE_PATH *f = (FILEPATH_DEVICE_PATH *) p1;
-			BS->CopyMem(f->PathName, FileName, size_str);
+			BS->CopyMem(p1, &file_path_node, sizeof(file_path_node));
+			
+			// Copy file name
+			FILEPATH_DEVICE_PATH *file_path = (FILEPATH_DEVICE_PATH *)p1;
+			BS->CopyMem(file_path->PathName, (VOID *)(UINTN)FileName, size_str);
 			p1 = NextDevicePathNode(p1);
 		}
-		BS->CopyMem(p1, p0, DevicePathNodeLength(p0));
+		
+		// Copy current node
+		UINTN node_length = DevicePathNodeLength(p0);
+		BS->CopyMem(p1, p0, node_length);
+		
+		// Check if we've reached the end
 		if (IsDevicePathEnd(p0)) {
 			break;
 		}
@@ -100,10 +145,15 @@ EFI_DEVICE_PATH *FileDevicePath(IN EFI_HANDLE Device OPTIONAL, IN CHAR16 *FileNa
 	return new_path;
 }
 
-CHAR16 *DevicePathToStr(EFI_DEVICE_PATH *DevPath) {
+CHAR16 *DevicePathToStr(CONST EFI_DEVICE_PATH_PROTOCOL *DevPath) {
+    if (!DevPath) {
+        return NULL;
+    }
 	UINTN path_length = 0;
-	for (EFI_DEVICE_PATH *p0 = DevPath;; p0 = NextDevicePathNode(p0)) {
-		if (DevicePathType(p0) != MEDIA_DEVICE_PATH || DevicePathSubType(p0) != MEDIA_FILEPATH_DP) {
+	// Calculate total path length
+	for (const EFI_DEVICE_PATH_PROTOCOL *p0 = DevPath; !IsDevicePathEnd(p0); p0 = NextDevicePathNode(p0)) {
+		if (DevicePathType(p0) != MEDIA_DEVICE_PATH || 
+            DevicePathSubType(p0) != MEDIA_FILEPATH_DP) {
 			break;
 		}
 		path_length += DevicePathNodeLength(p0) + 1;
@@ -118,13 +168,23 @@ CHAR16 *DevicePathToStr(EFI_DEVICE_PATH *DevPath) {
 	}
 
 	UINTN pos = 0;
-	for (EFI_DEVICE_PATH *p0 = DevPath; pos < path_length; p0 = NextDevicePathNode(p0)) {
-		FILEPATH_DEVICE_PATH *f = (FILEPATH_DEVICE_PATH *) p0;
-		BS->CopyMem(str + pos, f->PathName, StrLen(f->PathName) * sizeof(*str));
-		pos += DevicePathNodeLength(p0) + 1;
-		str[pos - 1] = L'\\';
+	// Build the path string
+	for (const EFI_DEVICE_PATH_PROTOCOL *p0 = DevPath; pos < path_length; p0 = NextDevicePathNode(p0)) {
+		const FILEPATH_DEVICE_PATH *file_path = (const FILEPATH_DEVICE_PATH *)p0;
+		UINTN name_length = StrLen(file_path->PathName);
+		
+		// Copy file name
+		BS->CopyMem(str + pos, (VOID *)(UINTN)file_path->PathName, name_length * sizeof(CHAR16));
+		pos += name_length;
+		
+		// Add path separator if not at the end
+		if (pos < path_length) {
+			str[pos++] = L'\\';
+		}
 	}
-	str[pos - 1] = 0;
+	
+	// Ensure null termination
+	str[pos] = L'\0';
 	return str;
 }
 
@@ -147,14 +207,6 @@ void StrnCat(IN CHAR16* dest, IN CONST CHAR16* src, UINTN len) {
 		*d++ = *src++;
 	}
 	*d = 0;
-}
-
-UINTN StrLen(IN CONST CHAR16* s) {
-	UINTN i = 0;
-	while (*s++) {
-		++i;
-	}
-	return i;
 }
 
 INTN StriCmp(IN CONST CHAR16* s1, IN CONST CHAR16* s2) {
