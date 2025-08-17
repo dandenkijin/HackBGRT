@@ -9,9 +9,16 @@
 #ifndef HACKBGRT_CONFIG_H
 #define HACKBGRT_CONFIG_H
 
+// Core types first
 #include "efi_types.h"
+
+// Configuration types
 #include "config/config_types.h"
+
+// File utilities
 #include "config/file_utils.h"
+
+// String utilities
 #include "str_utils.h"
 
 // Forward declarations

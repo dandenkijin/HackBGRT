@@ -15,7 +15,7 @@
 #include "file_utils.h"    // For file operations
 #include "parser.h"        // For configuration parsing
 #include "coordinate_parser.h"  // For coordinate parsing
-#include "../util.h"       // For string utilities
+#include "../str_utils.h"  // For string utilities
 
 // Platform-specific includes
 #ifdef _WIN32

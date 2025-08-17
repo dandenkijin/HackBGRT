@@ -111,6 +111,17 @@ FileError File_GetInfo(FileHandle* file, FileInfo* info);
 FileError File_ReadAll(const CHAR16* path, void** buffer, UINTN* size);
 
 /**
+ * @brief Load a file with additional padding space
+ *
+ * @param dir Directory handle
+ * @param path File path
+ * @param size_ptr Pointer to store file size
+ * @param padding Additional bytes to allocate after file content
+ * @return void* Pointer to allocated buffer with file content, NULL on error
+ */
+void* File_LoadWithPadding(EFI_FILE_HANDLE dir, const CHAR16* path, UINTN* size_ptr, UINTN padding);
+
+/**
  * @brief Read and parse a configuration file
  * 
  * @param config The configuration structure to populate

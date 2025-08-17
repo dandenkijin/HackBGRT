@@ -1,0 +1,6 @@
+# Basic test configuration for UEFI
+image=remove
+boot=EFI
+resolution=0x0
+debug=1
+log=1

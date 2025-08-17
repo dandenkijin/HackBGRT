@@ -4,7 +4,7 @@
  */
 #include "file_utils.h"
 #include "../log.h"        // For logging functions
-#include "../mem_utils.h"  // For memory management utilities
+#include "../mem_utils.h"  // For memory management utilities (includes ZeroMem)
 #include "../str_utils.h"  // For string utilities
 #include <string.h>        // For memcpy, memcmp, memset
 
@@ -280,6 +280,108 @@ bool File_ReadConfigFile(HackBGRT_config* config, const CHAR16* base_dir, const 
     (void)path;
     
     return false;
+}
+
+/**
+ * @brief Load a file with additional padding space
+ *
+ * @param dir Directory handle
+ * @param path File path
+ * @param size_ptr Pointer to store file size
+ * @param padding Additional bytes to allocate after file content
+ * @return void* Pointer to allocated buffer with file content, NULL on error
+ */
+void* File_LoadWithPadding(EFI_FILE_HANDLE dir, const CHAR16* path, UINTN* size_ptr, UINTN padding) {
+    EFI_STATUS e;
+    EFI_FILE_HANDLE handle = NULL;
+    EFI_FILE_INFO* file_info = NULL;
+    UINTN info_size = 0;
+    void* data = NULL;
+    UINTN size = 0;
+
+    // Validate input parameters
+    if (!dir || !path || !path[0] || !size_ptr) {
+        return NULL;
+    }
+
+    // First try to open the file directly
+    e = dir->Open(dir, &handle, path, EFI_FILE_MODE_READ, 0);
+    if (EFI_ERROR(e)) {
+        // Try to get directory info for better error reporting
+        e = dir->GetInfo(dir, &gEfiFileInfoGuid, &info_size, NULL);
+        if (e == EFI_BUFFER_TOO_SMALL) {
+            file_info = (EFI_FILE_INFO*)PLAT_ALLOCATE_POOL(info_size);
+            if (file_info) {
+                e = dir->GetInfo(dir, &gEfiFileInfoGuid, &info_size, file_info);
+                PLAT_FREE_POOL(file_info);
+            }
+        }
+        return NULL;
+    }
+
+    // Get file size
+    e = handle->SetPosition(handle, ~(UINT64)0);
+    if (EFI_ERROR(e)) {
+        handle->Close(handle);
+        return NULL;
+    }
+
+    UINT64 file_size = 0;
+    e = handle->GetPosition(handle, &file_size);
+    if (EFI_ERROR(e)) {
+        handle->Close(handle);
+        return NULL;
+    }
+
+    // Reset file position to beginning
+    e = handle->SetPosition(handle, 0);
+    if (EFI_ERROR(e)) {
+        Log(1, (CHAR16*)L"File_LoadWithPadding: Failed to reset file position. Status: %r\n", (UINTN)e);
+        handle->Close(handle);
+        return NULL;
+    }
+
+    // Allocate memory for file content plus padding
+    size = (UINTN)file_size;
+    Log(1, L"File_LoadWithPadding: Allocating %lu bytes for file data + %lu bytes padding\n",
+        (unsigned long)size, (unsigned long)padding);
+    
+    data = PLAT_ALLOCATE_POOL(size + padding);
+    if (!data) {
+        Log(1, L"File_LoadWithPadding: Failed to allocate %lu bytes. Status: %r\n",
+            (unsigned long)(size + padding), e);
+        handle->Close(handle);
+        return NULL;
+    }
+
+    // Read file content
+    UINTN read_size = size;
+    e = handle->Read(handle, &read_size, data);
+    if (EFI_ERROR(e) || read_size != size) {
+        Log(1, L"File_LoadWithPadding: Failed to read file. Requested: %lu, Read: %lu, Status: %r\n",
+            (unsigned long)size, (unsigned long)read_size, e);
+        PLAT_FREE_POOL(data);
+        handle->Close(handle);
+        return NULL;
+    }
+
+    // Zero out padding using memset (already included via string.h)
+    if (padding > 0) {
+        memset((UINT8*)data + size, 0, padding);
+    }
+
+    // Close the file
+    e = handle->Close(handle);
+    if (EFI_ERROR(e)) {
+        Log(1, L"File_LoadWithPadding: Warning - failed to close file handle. Status: %r\n", e);
+        // Continue anyway since we have the data
+    }
+
+    *size_ptr = size;
+    Log(1, L"File_LoadWithPadding: Successfully loaded %lu bytes from '%s' to %p\n",
+        (unsigned long)size, path, data);
+    
+    return data;
 }
 
 /**

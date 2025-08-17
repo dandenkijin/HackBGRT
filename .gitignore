@@ -63,8 +63,7 @@ hello.efi
 !.env.example
 
 # Temporary files created during testing
-/tmp/
-/temp/
+# tests/
 
 # Linux installation scripts
 linux-install.sh

@@ -7,6 +7,9 @@
  * and file I/O operations.
  */
 
+#ifndef CONFIG_C
+#define CONFIG_C
+
 #include "config.h"
 
 // Core system includes
@@ -17,10 +20,14 @@
 #include "config/file_utils.h"  // File I/O operations
 #include "mem_utils.h"          // Memory management
 #include "str_utils.h"          // String utilities
-#include "util.h"               // Utility functions
+#include "log.h"                // Logging functions
+#include <string.h>             // For memcpy
+#include <string.h>             // For memcpy
+#include "random.h"             // Random number generation
+#include "input.h"              // Input handling
+#include "mem_utils.h"          // For memory operations
 
-// Logging configuration
-#include "config/log.h"
+#endif // CONFIG_C
 
 #define CONFIG_MODULE_NAME(fmt, ...) Log(2, (const CHAR16 *)(fmt), ##__VA_ARGS__)
 
@@ -61,7 +68,7 @@ FileError Config_Init(void) {
     }
     
     // Initialize the configuration with default values
-    CopyMem(&g_config, &DEFAULT_CONFIG, sizeof(struct HackBGRT_config));
+    memcpy(&g_config, &DEFAULT_CONFIG, sizeof(struct HackBGRT_config));
     
     // Initialize required submodules
     status = File_Init();
@@ -99,7 +106,7 @@ FileError Config_LoadFromFile(const CHAR16* path, struct HackBGRT_config** confi
     }
 
     // Initialize with default values
-    CopyMem(new_config, &DEFAULT_CONFIG, sizeof(struct HackBGRT_config));
+    memcpy(new_config, &DEFAULT_CONFIG, sizeof(struct HackBGRT_config));
     
     // Read the configuration file
     VOID *file_data = NULL;
@@ -216,7 +223,7 @@ FileError Config_SetImagePath(struct HackBGRT_config* config, const CHAR16* path
         return FILE_ERR_OUT_OF_MEMORY;
     }
 
-    CopyMem(new_path, path, path_len * sizeof(CHAR16));
+    memcpy(new_path, path, path_len * sizeof(CHAR16));
     config->image_path = new_path;
     config->image_path_allocated = TRUE;
     
@@ -252,7 +259,7 @@ FileError Config_SetBootPath(struct HackBGRT_config* config, const CHAR16* path)
         return FILE_ERR_OUT_OF_MEMORY;
     }
 
-    CopyMem(new_path, path, path_len * sizeof(CHAR16));
+    memcpy(new_path, path, path_len * sizeof(CHAR16));
     config->boot_path = new_path;
     
     return FILE_ERR_NONE;

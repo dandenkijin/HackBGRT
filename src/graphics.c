@@ -7,9 +7,15 @@
 #include "efi.h"
 #include "config.h"
 #include "log.h"
-#include "util.h"
+#include <string.h>  // For memcpy/memset
 #include <Library/MemoryAllocationLib.h>  // For AllocatePool, FreePool
+#include "mem_utils.h"  // For memory utilities
 #include <Library/UefiBootServicesTableLib.h>  // For gBS
+
+// Define max macro if not already defined
+#ifndef max
+#define max(a,b) ((a) > (b) ? (a) : (b))
+#endif
 
 // Forward declarations
 EFI_GRAPHICS_OUTPUT_PROTOCOL* GetGOP(VOID);
@@ -30,8 +36,8 @@ EFI_GRAPHICS_OUTPUT_PROTOCOL *GetGOP(VOID) {
         UINTN count = 0;
         EFI_STATUS status;
 
-        // Use the global BS pointer with proper type casting
-        status = BS->LocateHandleBuffer(
+        // Use the global gBS pointer from UEFI Boot Services Table Library
+        status = gBS->LocateHandleBuffer(
             ByProtocol,
             (EFI_GUID *)&gop_guid,
             NULL,
